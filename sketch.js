@@ -4,23 +4,25 @@ let faces = [];
 
 // Each feature gets a fixed-size square (sizes never change).
 // "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
-// Ears aren't a faceMesh part, so they use the face-edge keypoints (234 = right, 454 = left).
+// Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
 const FEATURES = {
   leftEye:     { label: 'Left Eye',     size: 100, on: true, center: (f) => f.leftEye },
   rightEye:    { label: 'Right Eye',    size: 100, on: true, center: (f) => f.rightEye },
   leftBrow:    { label: 'Left Eyebrow', size: 110, on: true, center: (f) => f.leftEyebrow },
   rightBrow:   { label: 'Right Eyebrow', size: 110, on: true, center: (f) => f.rightEyebrow },
-  leftEar:     { label: 'Left Ear',     size: 90,  on: true, center: (f) => f.keypoints[454] },
-  rightEar:    { label: 'Right Ear',    size: 90,  on: true, center: (f) => f.keypoints[234] },
   nose:        { label: 'Nose',         size: 90,  on: true, center: (f) => f.keypoints[1] },
   mouth:       { label: 'Mouth',        size: 130, on: true, center: (f) => f.lips },
 };
 
+// Size slider range (pixels)
+const MIN_SIZE = 20;
+const MAX_SIZE = 300;
+
 // GUI layout: three columns
 const COLUMNS = [
-  { title: 'Left',   keys: ['leftEye', 'leftBrow', 'leftEar'] },
+  { title: 'Left',   keys: ['leftEye', 'leftBrow'] },
   { title: 'Center', keys: ['nose', 'mouth'] },
-  { title: 'Right',  keys: ['rightEye', 'rightBrow', 'rightEar'] },
+  { title: 'Right',  keys: ['rightEye', 'rightBrow'] },
 ];
 
 const ON_COLOR = '#2ecc71';
@@ -82,6 +84,13 @@ function buildGui() {
         refresh();
       });
       refresh();
+
+      // size slider: resizes this feature's square (it stays fixed otherwise)
+      const slider = createSlider(MIN_SIZE, MAX_SIZE, f.size, 1);
+      slider.parent(colDiv);
+      slider.style('width', '100%');
+      slider.style('margin', '0 0 8px 0');
+      slider.input(() => (f.size = slider.value()));
     }
   }
 }
