@@ -29,8 +29,8 @@ function draw() {
   if (faces.length > 0) {
     // track the person's right eye (appears on the left of the mirrored view)
     const eye = faces[0].rightEye;
-    // keypoints are in raw video coordinates; mirror x to match the flipped image
-    const x = width - eye.centerX * (width / video.width);
+    // keypoints already match the mirrored image, so no extra flip is needed
+    const x = eye.centerX * (width / video.width);
     const y = eye.centerY * (height / video.height);
 
     noFill();
