@@ -19,16 +19,21 @@ function setup() {
 function draw() {
   background(0);
 
-  // webcam image, drawn unflipped so it lines up with the tracked points
+  // mirrored (selfie-style) webcam image
+  push();
+  translate(width, 0);
+  scale(-1, 1);
   image(video, 0, 0, width, height);
+  pop();
 
   if (faces.length > 0) {
-    // track the person's right eye (the eye on the left side of the image)
+    // track the person's right eye (appears on the left of the mirrored view)
     const eye = faces[0].rightEye;
     // scale from the camera's real pixel size to the canvas
     const vw = video.elt.videoWidth || video.width;
     const vh = video.elt.videoHeight || video.height;
-    const x = eye.centerX * (width / vw);
+    // mirror x so the box lines up with the flipped image
+    const x = width - eye.centerX * (width / vw);
     const y = eye.centerY * (height / vh);
 
     noFill();
