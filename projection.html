@@ -13,6 +13,210 @@
   </head>
   <body>
     <main></main>
-    <script src="projection.js"></script>
+    <div id="status" style="position:fixed;top:0;left:0;right:0;padding:6px 10px;background:#333;color:#fff;font:13px sans-serif;z-index:9">Loading libraries...</div>
+    <script>
+      // show problems on the page itself, since the console may not be visible
+      const statusEl = document.getElementById('status');
+      window.addEventListener('error', (e) => {
+        statusEl.style.background = '#a00';
+        statusEl.textContent = 'Error: ' + e.message + (e.target && e.target.src ? ' (' + e.target.src + ')' : '');
+      }, true);
+      window.addEventListener('load', () => {
+        if (typeof p5 === 'undefined' || typeof ml5 === 'undefined') {
+          statusEl.style.background = '#a00';
+          statusEl.textContent = 'Could not load ' + (typeof p5 === 'undefined' ? 'p5' : 'ml5') + ' from the CDN (check internet / blocked scripts).';
+        } else {
+          statusEl.textContent = 'Libraries loaded. Allow camera access when asked...';
+        }
+      });
+    </script>
+    <script>
+let video;
+let faceMesh;
+let faces = [];
+
+// Each feature is a fixed-size square region of the video that gets blown up to fill the canvas.
+// "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
+// Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
+const FEATURES = [
+  { label: 'Left Eye',      size: 100, center: (f) => f.leftEye },
+  { label: 'Right Eye',     size: 100, center: (f) => f.rightEye },
+  { label: 'Left Eyebrow',  size: 110, center: (f) => f.leftEyebrow },
+  { label: 'Right Eyebrow', size: 110, center: (f) => f.rightEyebrow },
+  { label: 'Nose',          size: 90,  center: (f) => f.keypoints[1] },
+  { label: 'Mouth',         size: 130, center: (f) => f.lips },
+];
+
+const MIN_SIZE = 20;
+const MAX_SIZE = 300;
+const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
+const INSET = 180;      // size of the small full-view preview in the corner
+
+let current = 0;
+let labelDiv, slider;
+let smoothX = null;
+let smoothY = null;
+
+function preload() {
+  faceMesh = ml5.faceMesh({ maxFaces: 1 });
+}
+
+function setup() {
+  const cnv = createCanvas(800, 800);
+  cnv.parent(select('main'));
+  video = createCapture({ video: { width: 800, height: 800 }, audio: false });
+  video.size(800, 800);
+  video.hide();
+  faceMesh.detectStart(video, (results) => (faces = results));
+  const st = document.getElementById('status');
+  if (st) st.remove();
+  buildGui();
+}
+
+function buildGui() {
+  const gui = createDiv();
+  gui.parent(select('main'));
+  gui.style('display', 'grid');
+  gui.style('grid-template-columns', '1fr 1fr 1fr');
+  gui.style('gap', '12px');
+  gui.style('width', '800px');
+  gui.style('margin-top', '12px');
+  gui.style('align-items', 'center');
+
+  const styleBtn = (b) => {
+    b.style('padding', '10px');
+    b.style('border', 'none');
+    b.style('border-radius', '6px');
+    b.style('color', 'white');
+    b.style('background-color', '#2ecc71');
+    b.style('font-family', 'sans-serif');
+    b.style('font-size', '14px');
+    b.style('cursor', 'pointer');
+  };
+
+  const prev = createButton('< Previous');
+  prev.parent(gui);
+  styleBtn(prev);
+  prev.mousePressed(() => cycle(-1));
+
+  const mid = createDiv();
+  mid.parent(gui);
+  mid.style('display', 'flex');
+  mid.style('flex-direction', 'column');
+  mid.style('gap', '6px');
+
+  labelDiv = createDiv();
+  labelDiv.parent(mid);
+  labelDiv.style('color', '#ccc');
+  labelDiv.style('font-family', 'sans-serif');
+  labelDiv.style('text-align', 'center');
+  labelDiv.style('text-transform', 'uppercase');
+  labelDiv.style('letter-spacing', '2px');
+  labelDiv.style('font-size', '12px');
+
+  // size slider: resizes the current feature's square (bigger square = more zoomed out)
+  slider = createSlider(MIN_SIZE, MAX_SIZE, FEATURES[0].size, 1);
+  slider.parent(mid);
+  slider.style('width', '100%');
+  slider.input(() => (FEATURES[current].size = slider.value()));
+
+  const next = createButton('Next >');
+  next.parent(gui);
+  styleBtn(next);
+  next.mousePressed(() => cycle(1));
+
+  updateGui();
+}
+
+function cycle(dir) {
+  current = (current + dir + FEATURES.length) % FEATURES.length;
+  smoothX = null; // jump straight to the new feature instead of gliding across the face
+  updateGui();
+}
+
+function updateGui() {
+  labelDiv.html(`${FEATURES[current].label} (${current + 1}/${FEATURES.length})`);
+  slider.value(FEATURES[current].size);
+}
+
+function keyPressed() {
+  if (keyCode === RIGHT_ARROW || key === ' ') cycle(1);
+  if (keyCode === LEFT_ARROW) cycle(-1);
+}
+
+function draw() {
+  background(0);
+
+  const vw = video.elt.videoWidth || video.width;
+  const vh = video.elt.videoHeight || video.height;
+
+  const f = FEATURES[current];
+  const face = faces[0];
+  const p = face && f.center(face);
+
+  if (p) {
+    const px = p.centerX !== undefined ? p.centerX : p.x;
+    const py = p.centerY !== undefined ? p.centerY : p.y;
+    smoothX = smoothX === null ? px : lerp(smoothX, px, SMOOTHING);
+    smoothY = smoothY === null ? py : lerp(smoothY, py, SMOOTHING);
+  }
+
+  if (smoothX === null) {
+    // no face yet: show the plain mirrored camera so it's clear the sketch is alive
+    push();
+    translate(width, 0);
+    scale(-1, 1);
+    image(video, 0, 0, width, height);
+    pop();
+    fill(0, 160);
+    noStroke();
+    rect(0, height / 2 - 30, width, 60);
+    fill(255);
+    textSize(24);
+    textAlign(CENTER, CENTER);
+    text(faces.length === 0 ? 'Looking for a face...' : 'Face found, tracking...', width / 2, height / 2);
+    return;
+  }
+
+  // the square in raw video pixels (canvas size -> video size), kept fully inside the frame
+  const sw = f.size * (vw / width);
+  const sh = f.size * (vh / height);
+  const sx = constrain(smoothX - sw / 2, 0, vw - sw);
+  const sy = constrain(smoothY - sh / 2, 0, vh - sh);
+
+  // project what's inside the square across the whole canvas, mirrored like a selfie view.
+  // Uses the canvas API directly so the crop is taken in the camera's true pixel coordinates.
+  const ctx = drawingContext;
+  ctx.save();
+  ctx.translate(width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video.elt, sx, sy, sw, sh, 0, 0, width, height);
+  ctx.restore();
+
+  drawInset(vw, vh, sx, sy, sw, sh);
+}
+
+// small mirrored preview of the full camera with the current square outlined
+function drawInset(vw, vh, sx, sy, sw, sh) {
+  const m = 16;
+  const ix = width - INSET - m;
+  const iy = height - INSET - m;
+  push();
+  translate(ix + INSET, iy);
+  scale(-1, 1);
+  image(video, 0, 0, INSET, INSET);
+  pop();
+
+  noFill();
+  stroke(255);
+  strokeWeight(2);
+  const k = INSET / vw;
+  const kh = INSET / vh;
+  // mirror x to match the flipped preview
+  rect(ix + INSET - (sx + sw) * k, iy + sy * kh, sw * k, sh * kh);
+  rect(ix, iy, INSET, INSET);
+}
+
+    </script>
   </body>
 </html>

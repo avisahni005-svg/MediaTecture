@@ -35,6 +35,8 @@ function setup() {
   video.size(800, 800);
   video.hide();
   faceMesh.detectStart(video, (results) => (faces = results));
+  const st = document.getElementById('status');
+  if (st) st.remove();
   buildGui();
 }
 
