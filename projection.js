@@ -127,10 +127,19 @@ function draw() {
   }
 
   if (smoothX === null) {
-    fill(255);
+    // no face yet: show the plain mirrored camera so it's clear the sketch is alive
+    push();
+    translate(width, 0);
+    scale(-1, 1);
+    image(video, 0, 0, width, height);
+    pop();
+    fill(0, 160);
     noStroke();
+    rect(0, height / 2 - 30, width, 60);
+    fill(255);
+    textSize(24);
     textAlign(CENTER, CENTER);
-    text('Looking for a face...', width / 2, height / 2);
+    text(faces.length === 0 ? 'Looking for a face...' : 'Face found, tracking...', width / 2, height / 2);
     return;
   }
 
@@ -140,12 +149,14 @@ function draw() {
   const sx = constrain(smoothX - sw / 2, 0, vw - sw);
   const sy = constrain(smoothY - sh / 2, 0, vh - sh);
 
-  // project what's inside the square across the whole canvas, mirrored like a selfie view
-  push();
-  translate(width, 0);
-  scale(-1, 1);
-  image(video, 0, 0, width, height, sx, sy, sw, sh);
-  pop();
+  // project what's inside the square across the whole canvas, mirrored like a selfie view.
+  // Uses the canvas API directly so the crop is taken in the camera's true pixel coordinates.
+  const ctx = drawingContext;
+  ctx.save();
+  ctx.translate(width, 0);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video.elt, sx, sy, sw, sh, 0, 0, width, height);
+  ctx.restore();
 
   drawInset(vw, vh, sx, sy, sw, sh);
 }
