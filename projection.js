@@ -166,7 +166,8 @@ function buildGui() {
 
   // labels: write the feature name in the center of each box
   labelsBtn = createButton('Labels');
-  labelsBtn.parent(col);
+  labelsBtn.parent(fxCol);
+  fxCol.elt.insertBefore(labelsBtn.elt, fxCol.elt.firstChild); // top of the second column
   labelsBtn.style('padding', '10px');
   labelsBtn.style('border', 'none');
   labelsBtn.style('border-radius', '6px');
@@ -426,17 +427,13 @@ function zoomedIn(box) {
   return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
 }
 
-// Feature name in monospace, centered on (cx, cy); green with a thin black outline so it reads on any footage.
+// Feature name in plain white monospace, centered on (cx, cy).
 function drawLabel(ctx, text, cx, cy, size) {
   ctx.save();
   ctx.font = `${size}px monospace`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.lineJoin = 'round';
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = '#000000';
-  ctx.strokeText(text, cx, cy);
-  ctx.fillStyle = BTN_COLOR;
+  ctx.fillStyle = '#ffffff';
   ctx.fillText(text, cx, cy);
   ctx.restore();
 }
