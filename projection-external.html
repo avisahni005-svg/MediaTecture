@@ -484,7 +484,10 @@ function drawLabel(ctx, text, cx, cy, size) {
 }
 
 // (Re)start the webcam on a specific camera and point face tracking at it.
+// Every camera switch builds a fresh faceMesh model: re-pointing one running model at a new video
+// is unreliable (its loop can die on the old, stopped stream), which left tracking dead on the new camera.
 function startCamera(deviceId) {
+  const firstStart = !video;
   if (video) {
     faceMesh.detectStop();
     video.remove(); // also stops the old camera stream
@@ -493,10 +496,23 @@ function startCamera(deviceId) {
   smooth.fill(null);
   const constraints = { video: { width: 800, height: 800 }, audio: false };
   if (deviceId) constraints.video.deviceId = { exact: deviceId };
-  video = createCapture(constraints, listCameras);
-  video.size(800, 800);
-  video.hide();
-  faceMesh.detectStart(video, (results) => (faces = results));
+  const vid = createCapture(constraints, listCameras);
+  video = vid;
+  vid.size(800, 800);
+  vid.hide();
+
+  const startTracking = () => {
+    if (vid !== video) return; // the user already switched to another camera
+    const model = faceMesh;
+    model.detectStart(vid, (results) => {
+      if (model === faceMesh) faces = results; // ignore results from an old model
+    });
+  };
+  if (firstStart) {
+    startTracking(); // the model loaded in preload()
+  } else {
+    faceMesh = ml5.faceMesh({ maxFaces: 1 }, startTracking);
+  }
 }
 
 // Fill the dropdown with every connected camera. Names only appear once camera permission is granted,
