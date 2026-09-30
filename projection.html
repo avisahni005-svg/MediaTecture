@@ -59,7 +59,8 @@ const MAX_ZOOM = 5;
 const RANDOM_MAX_ZOOM = 2.5; // Randomize only picks zooms up to this
 let zoomLabel, zoomSlider;
 let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
-let fullBtn;
+let fullBtn, labelsBtn;
+let showLabels = false; // write each highlighted feature's name in the center of its box
 // 'none' | 'mono' | 'duo': one filter for the footage inside the box, one for everything outside it
 let fxIn = 'none';
 let fxOut = 'none';
@@ -196,6 +197,22 @@ function buildGui() {
     updateGui();
   });
 
+  // labels: write the feature name in the center of each box
+  labelsBtn = createButton('Labels');
+  labelsBtn.parent(col);
+  labelsBtn.style('padding', '10px');
+  labelsBtn.style('border', 'none');
+  labelsBtn.style('border-radius', '6px');
+  labelsBtn.style('background-color', BTN_COLOR);
+  labelsBtn.style('color', 'black');
+  labelsBtn.style('font-family', MONO);
+  labelsBtn.style('font-size', '14px');
+  labelsBtn.style('cursor', 'pointer');
+  labelsBtn.mousePressed(() => {
+    showLabels = !showLabels;
+    updateGui();
+  });
+
   // size slider (flipped): higher value = smaller box = more zoomed in
   const sliderBox = createDiv();
   sliderBox.parent(side);
@@ -261,6 +278,7 @@ function randomize() {
   zoomSlider.value(zoom);
   showZoom();
   fxIn = random(['none', 'mono', 'duo']);
+  showLabels = random() < 0.5;
   updateGui();
 }
 
@@ -291,6 +309,7 @@ function updateGui() {
   // highlighted features are full green, the others are dimmed
   buttons.forEach((btn, i) => btn.style('opacity', selected.has(i) ? '1' : '0.35'));
   fullBtn.style('opacity', fullView ? '1' : '0.35');
+  labelsBtn.style('opacity', showLabels ? '1' : '0.35');
   for (const m in fxBtns.in) fxBtns.in[m].style('opacity', fxIn === m ? '1' : '0.35');
   for (const m in fxBtns.out) fxBtns.out[m].style('opacity', fxOut === m ? '1' : '0.35');
   sizeLabel.html(`BOX SIZE: ${FEATURES[current].label.toUpperCase()}`);
@@ -319,7 +338,7 @@ function draw() {
       const py = p.centerY !== undefined ? p.centerY : p.y;
       smooth[idx] = smooth[idx] === null ? { x: px, y: py } : { x: lerp(smooth[idx].x, px, SMOOTHING), y: lerp(smooth[idx].y, py, SMOOTHING) };
     }
-    if (smooth[idx]) boxes.push(makeBox(vw, vh, f.size, smooth[idx]));
+    if (smooth[idx]) boxes.push({ ...makeBox(vw, vh, f.size, smooth[idx]), label: f.label });
   });
 
   const ctx = drawingContext;
@@ -339,6 +358,7 @@ function draw() {
       stroke(BTN_COLOR);
       strokeWeight(2);
       rect(bx, by, bw, bh);
+      if (showLabels) drawLabel(ctx, b.label, bx + bw / 2, by + bh / 2, 20);
     }
     drawPreview(vw, vh, boxes);
     return;
@@ -370,6 +390,7 @@ function draw() {
     const ox = (width - inRow * cell) / 2 + c * cell;
     const oy = (height - rows * cell) / 2 + r * cell;
     drawFiltered(ctx, zoomedIn(b), ox, oy, cell, cell, fxIn);
+    if (showLabels) drawLabel(ctx, b.label, ox + cell / 2, oy + cell / 2, constrain(cell / 12, 14, 32));
   });
 
   drawPreview(vw, vh, boxes);
@@ -404,6 +425,7 @@ function drawPreview(vw, vh, boxes) {
     preview.stroke(BTN_COLOR);
     preview.strokeWeight(2);
     preview.rect(x, y, box.sw * k, box.sh * kh);
+    if (showLabels) drawLabel(pctx, box.label, x + (box.sw * k) / 2, y + (box.sh * kh) / 2, 11);
   }
 }
 
@@ -435,6 +457,21 @@ function zoomedIn(box) {
   const sw = box.sw / zoom;
   const sh = box.sh / zoom;
   return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
+}
+
+// Feature name in monospace, centered on (cx, cy); green with a thin black outline so it reads on any footage.
+function drawLabel(ctx, text, cx, cy, size) {
+  ctx.save();
+  ctx.font = `${size}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineJoin = 'round';
+  ctx.lineWidth = 3;
+  ctx.strokeStyle = '#000000';
+  ctx.strokeText(text, cx, cy);
+  ctx.fillStyle = BTN_COLOR;
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
 }
 
     </script>
