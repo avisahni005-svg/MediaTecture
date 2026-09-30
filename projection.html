@@ -53,6 +53,8 @@ const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zo
 
 let current = 0;
 let slider, side;
+let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
+let fullBtn;
 const buttons = [];
 
 const BTN_COLOR = '#00ff00';
@@ -111,6 +113,22 @@ function buildGui() {
     buttons[idx] = btn;
   });
 
+  // full view: project the whole camera view (what the small preview shows) onto the main canvas
+  fullBtn = createButton('Full View');
+  fullBtn.parent(col);
+  fullBtn.style('padding', '10px');
+  fullBtn.style('border', 'none');
+  fullBtn.style('border-radius', '6px');
+  fullBtn.style('background-color', BTN_COLOR);
+  fullBtn.style('color', 'black');
+  fullBtn.style('font-family', MONO);
+  fullBtn.style('font-size', '14px');
+  fullBtn.style('cursor', 'pointer');
+  fullBtn.mousePressed(() => {
+    fullView = true;
+    updateGui();
+  });
+
   // size slider (flipped): higher value = smaller box = more zoomed in
   const sliderBox = createDiv();
   sliderBox.parent(side);
@@ -143,6 +161,7 @@ const sizeToSlider = sliderToSize; // the flip is its own inverse
 
 function select_feature(idx) {
   current = idx;
+  fullView = false;
   smoothX = null; // jump straight to the new feature instead of gliding across the face
   updateGui();
 }
@@ -153,7 +172,8 @@ function cycle(dir) {
 
 function updateGui() {
   // active feature is full green, the others are dimmed
-  buttons.forEach((btn, i) => btn.style('opacity', i === current ? '1' : '0.35'));
+  buttons.forEach((btn, i) => btn.style('opacity', !fullView && i === current ? '1' : '0.35'));
+  fullBtn.style('opacity', fullView ? '1' : '0.35');
   slider.value(sizeToSlider(FEATURES[current].size));
 }
 
@@ -179,6 +199,26 @@ function draw() {
     smoothY = smoothY === null ? py : lerp(smoothY, py, SMOOTHING);
   }
 
+  if (fullView) {
+    // whole camera view on the main canvas, mirrored, with the current square outlined in green
+    push();
+    translate(width, 0);
+    scale(-1, 1);
+    image(video, 0, 0, width, height);
+    pop();
+    if (smoothX === null) {
+      drawPreview(vw, vh, null);
+      return;
+    }
+    const b = currentBox(vw, vh, f);
+    noFill();
+    stroke(BTN_COLOR);
+    strokeWeight(2);
+    rect(width - (b.sx + b.sw) * (width / vw), b.sy * (height / vh), b.sw * (width / vw), b.sh * (height / vh));
+    drawPreview(vw, vh, b);
+    return;
+  }
+
   if (smoothX === null) {
     // no face yet: show the plain mirrored camera so it's clear the sketch is alive
     push();
@@ -197,11 +237,7 @@ function draw() {
     return;
   }
 
-  // the square in raw video pixels (canvas size -> video size), kept fully inside the frame
-  const sw = f.size * (vw / width);
-  const sh = f.size * (vh / height);
-  const sx = constrain(smoothX - sw / 2, 0, vw - sw);
-  const sy = constrain(smoothY - sh / 2, 0, vh - sh);
+  const { sx, sy, sw, sh } = currentBox(vw, vh, f);
 
   // project what's inside the square across the whole canvas, mirrored like a selfie view.
   // Uses the canvas API directly so the crop is taken in the camera's true pixel coordinates.
@@ -226,12 +262,24 @@ function drawPreview(vw, vh, box) {
 
   if (!box) return;
   preview.noFill();
-  preview.stroke(255);
+  preview.stroke(BTN_COLOR);
   preview.strokeWeight(2);
   const k = PREVIEW / vw;
   const kh = PREVIEW / vh;
   // mirror x to match the flipped preview
   preview.rect(PREVIEW - (box.sx + box.sw) * k, box.sy * kh, box.sw * k, box.sh * kh);
+}
+
+// the current feature's square in raw video pixels (canvas size -> video size), kept fully inside the frame
+function currentBox(vw, vh, f) {
+  const sw = f.size * (vw / width);
+  const sh = f.size * (vh / height);
+  return {
+    sx: constrain(smoothX - sw / 2, 0, vw - sw),
+    sy: constrain(smoothY - sh / 2, 0, vh - sh),
+    sw,
+    sh,
+  };
 }
 
     </script>
