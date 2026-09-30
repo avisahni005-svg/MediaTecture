@@ -56,6 +56,7 @@ let slider, side;
 let zoom = 1; // magnification of the footage inside the box (1 = none)
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
+const RANDOM_MAX_ZOOM = 2.5; // Randomize only picks zooms up to this
 let zoomLabel, zoomSlider;
 let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
 let fullBtn;
@@ -256,7 +257,7 @@ function randomize() {
   smooth.fill(null);
   selected.add(next);
   current = next;
-  zoom = round(random(MIN_ZOOM, MAX_ZOOM) * 10) / 10;
+  zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
   zoomSlider.value(zoom);
   showZoom();
   fxIn = random(['none', 'mono', 'duo']);
