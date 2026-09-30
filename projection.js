@@ -18,7 +18,7 @@ const MIN_SIZE = 20;
 const MAX_SIZE = 300;
 const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
 
-let current = 0;
+let current = 0; // the feature whose size the slider edits (last one switched on)
 let slider, side;
 let zoom = 1; // magnification of the footage inside the box (1 = none)
 const MIN_ZOOM = 1;
@@ -37,8 +37,10 @@ const MONO = 'monospace';
 const PREVIEW = 300; // size of the small full-camera preview to the right of the canvas
 let preview;
 
-let smoothX = null;
-let smoothY = null;
+// features can be highlighted together (or none at all); each has its own smoothed position
+const selected = new Set([0]);
+const smooth = FEATURES.map(() => null);
+let sizeLabel;
 
 function preload() {
   faceMesh = ml5.faceMesh({ maxFaces: 1 });
@@ -126,7 +128,7 @@ function buildGui() {
     btn.style('font-family', MONO);
     btn.style('font-size', '14px');
     btn.style('cursor', 'pointer');
-    btn.mousePressed(() => select_feature(idx));
+    btn.mousePressed(() => toggle_feature(idx));
     buttons[idx] = btn;
   });
 
@@ -155,7 +157,8 @@ function buildGui() {
   sliderBox.style('color', BTN_COLOR);
   sliderBox.style('font-family', MONO);
   sliderBox.style('font-size', '12px');
-  createDiv('BOX SIZE').parent(sliderBox);
+  sizeLabel = createDiv();
+  sizeLabel.parent(sliderBox);
   slider = createSlider(MIN_SIZE, MAX_SIZE, sizeToSlider(FEATURES[0].size), 1);
   slider.parent(sliderBox);
   slider.style('width', '100%');
@@ -197,22 +200,36 @@ function sliderToSize(v) {
 }
 const sizeToSlider = sliderToSize; // the flip is its own inverse
 
-function select_feature(idx) {
-  current = idx;
-  smoothX = null; // jump straight to the new feature instead of gliding across the face
+// click a feature to switch it on or off; any number (including none) can be on at once
+function toggle_feature(idx) {
+  if (selected.has(idx)) {
+    selected.delete(idx);
+    if (current === idx && selected.size > 0) current = [...selected].pop();
+  } else {
+    selected.add(idx);
+    smooth[idx] = null; // jump straight to the face instead of gliding in from an old position
+    current = idx;
+  }
   updateGui();
 }
 
+// arrow keys / space: jump to a single feature
 function cycle(dir) {
-  select_feature((current + dir + FEATURES.length) % FEATURES.length);
+  const next = (current + dir + FEATURES.length) % FEATURES.length;
+  selected.clear();
+  smooth.fill(null);
+  selected.add(next);
+  current = next;
+  updateGui();
 }
 
 function updateGui() {
-  // active feature is full green, the others are dimmed
-  buttons.forEach((btn, i) => btn.style('opacity', i === current ? '1' : '0.35'));
+  // highlighted features are full green, the others are dimmed
+  buttons.forEach((btn, i) => btn.style('opacity', selected.has(i) ? '1' : '0.35'));
   fullBtn.style('opacity', fullView ? '1' : '0.35');
   for (const m in fxBtns.in) fxBtns.in[m].style('opacity', fxIn === m ? '1' : '0.35');
   for (const m in fxBtns.out) fxBtns.out[m].style('opacity', fxOut === m ? '1' : '0.35');
+  sizeLabel.html(`BOX SIZE: ${FEATURES[current].label.toUpperCase()}`);
   slider.value(sizeToSlider(FEATURES[current].size));
 }
 
@@ -226,105 +243,104 @@ function draw() {
 
   const vw = video.elt.videoWidth || video.width;
   const vh = video.elt.videoHeight || video.height;
-
-  const f = FEATURES[current];
   const face = faces[0];
-  const p = face && f.center(face);
 
-  if (p) {
-    const px = p.centerX !== undefined ? p.centerX : p.x;
-    const py = p.centerY !== undefined ? p.centerY : p.y;
-    smoothX = smoothX === null ? px : lerp(smoothX, px, SMOOTHING);
-    smoothY = smoothY === null ? py : lerp(smoothY, py, SMOOTHING);
-  }
-
-  if (fullView) {
-    // whole camera view on the main canvas, mirrored, with the current square outlined in green
-    drawFiltered(drawingContext, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, width, height, fxOut);
-    if (smoothX === null) {
-      drawPreview(vw, vh, null);
-      return;
+  // follow every highlighted feature, then work out its square in raw video pixels
+  const boxes = [];
+  selected.forEach((idx) => {
+    const f = FEATURES[idx];
+    const p = face && f.center(face);
+    if (p) {
+      const px = p.centerX !== undefined ? p.centerX : p.x;
+      const py = p.centerY !== undefined ? p.centerY : p.y;
+      smooth[idx] = smooth[idx] === null ? { x: px, y: py } : { x: lerp(smooth[idx].x, px, SMOOTHING), y: lerp(smooth[idx].y, py, SMOOTHING) };
     }
-    const b = currentBox(vw, vh, f);
-    const bx = width - (b.sx + b.sw) * (width / vw);
-    const by = b.sy * (height / vh);
-    const bw = b.sw * (width / vw);
-    const bh = b.sh * (height / vh);
-    // redraw the box on top so the outside filter never touches it
-    drawFiltered(drawingContext, zoomedIn(b), bx, by, bw, bh, fxIn);
-    noFill();
-    stroke(BTN_COLOR);
-    strokeWeight(2);
-    rect(bx, by, bw, bh);
-    drawPreview(vw, vh, b);
+    if (smooth[idx]) boxes.push(makeBox(vw, vh, f.size, smooth[idx]));
+  });
+
+  const ctx = drawingContext;
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  // whole camera view: when Full View is on, or when no feature is highlighted (no box)
+  if (fullView || selected.size === 0) {
+    drawFiltered(ctx, whole, 0, 0, width, height, fxOut);
+    for (const b of boxes) {
+      const bx = width - (b.sx + b.sw) * (width / vw);
+      const by = b.sy * (height / vh);
+      const bw = b.sw * (width / vw);
+      const bh = b.sh * (height / vh);
+      // redraw the box on top so the outside filter never touches it
+      drawFiltered(ctx, zoomedIn(b), bx, by, bw, bh, fxIn);
+      noFill();
+      stroke(BTN_COLOR);
+      strokeWeight(2);
+      rect(bx, by, bw, bh);
+    }
+    drawPreview(vw, vh, boxes);
     return;
   }
 
-  if (smoothX === null) {
+  if (boxes.length === 0) {
     // no face yet: show the plain mirrored camera so it's clear the sketch is alive
-    push();
-    translate(width, 0);
-    scale(-1, 1);
-    image(video, 0, 0, width, height);
-    pop();
+    drawFiltered(ctx, whole, 0, 0, width, height, 'none');
     fill(0, 160);
     noStroke();
     rect(0, height / 2 - 30, width, 60);
     fill(255);
     textSize(24);
     textAlign(CENTER, CENTER);
-    text(faces.length === 0 ? 'Looking for a face...' : 'Face found, tracking...', width / 2, height / 2);
-    drawPreview(vw, vh, null);
+    text('Looking for a face...', width / 2, height / 2);
+    drawPreview(vw, vh, boxes);
     return;
   }
 
-  const { sx, sy, sw, sh } = currentBox(vw, vh, f);
+  // project each highlighted box onto the canvas: one fills it, several tile it in a centered grid
+  const n = boxes.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const cell = width / cols;
+  boxes.forEach((b, i) => {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const inRow = Math.min(cols, n - r * cols);
+    const ox = (width - inRow * cell) / 2 + c * cell;
+    const oy = (height - rows * cell) / 2 + r * cell;
+    drawFiltered(ctx, zoomedIn(b), ox, oy, cell, cell, fxIn);
+  });
 
-  // project what's inside the square across the whole canvas, mirrored like a selfie view.
-  // Uses the canvas API directly so the crop is taken in the camera's true pixel coordinates.
-  const ctx = drawingContext;
-  if (fxIn === 'none') {
-    ctx.save();
-    ctx.translate(width, 0);
-    ctx.scale(-1, 1);
-    const z = zoomedIn({ sx, sy, sw, sh });
-    ctx.drawImage(video.elt, z.sx, z.sy, z.sw, z.sh, 0, 0, width, height);
-    ctx.restore();
-  } else {
-    drawFiltered(ctx, zoomedIn({ sx, sy, sw, sh }), 0, 0, width, height, fxIn);
-  }
-
-  drawPreview(vw, vh, { sx, sy, sw, sh });
+  drawPreview(vw, vh, boxes);
 }
 
-// small mirrored preview of the full camera (beside the canvas) with the current square outlined
-function drawPreview(vw, vh, box) {
-  preview.background(0);
-  drawFiltered(preview.drawingContext, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
-
-  if (!box) return;
-  const bk = PREVIEW / vw;
-  const bkh = PREVIEW / vh;
-  drawFiltered(preview.drawingContext, zoomedIn(box), PREVIEW - (box.sx + box.sw) * bk, box.sy * bkh, box.sw * bk, box.sh * bkh, fxIn);
-  preview.noFill();
-  preview.stroke(BTN_COLOR);
-  preview.strokeWeight(2);
-  const k = PREVIEW / vw;
-  const kh = PREVIEW / vh;
-  // mirror x to match the flipped preview
-  preview.rect(PREVIEW - (box.sx + box.sw) * k, box.sy * kh, box.sw * k, box.sh * kh);
-}
-
-// the current feature's square in raw video pixels (canvas size -> video size), kept fully inside the frame
-function currentBox(vw, vh, f) {
-  const sw = f.size * (vw / width);
-  const sh = f.size * (vh / height);
+// the square for a feature centered on `pt`, in raw video pixels (canvas size -> video size), kept inside the frame
+function makeBox(vw, vh, size, pt) {
+  const sw = size * (vw / width);
+  const sh = size * (vh / height);
   return {
-    sx: constrain(smoothX - sw / 2, 0, vw - sw),
-    sy: constrain(smoothY - sh / 2, 0, vh - sh),
+    sx: constrain(pt.x - sw / 2, 0, vw - sw),
+    sy: constrain(pt.y - sh / 2, 0, vh - sh),
     sw,
     sh,
   };
+}
+
+// small mirrored preview of the full camera (beside the canvas) with the highlighted squares outlined
+function drawPreview(vw, vh, boxes) {
+  preview.background(0);
+  const pctx = preview.drawingContext;
+  drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
+
+  const k = PREVIEW / vw;
+  const kh = PREVIEW / vh;
+  for (const box of boxes) {
+    // mirror x to match the flipped preview
+    const x = PREVIEW - (box.sx + box.sw) * k;
+    const y = box.sy * kh;
+    drawFiltered(pctx, zoomedIn(box), x, y, box.sw * k, box.sh * kh, fxIn);
+    preview.noFill();
+    preview.stroke(BTN_COLOR);
+    preview.strokeWeight(2);
+    preview.rect(x, y, box.sw * k, box.sh * kh);
+  }
 }
 
 // Draw a rect of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh) of `ctx`,
