@@ -22,8 +22,10 @@ let current = 0;
 let slider, side;
 let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
 let fullBtn;
-let fxMode = 'none'; // 'none' | 'mono' | 'duo': filter applied only to the footage inside the box
-const fxBtns = {};
+// 'none' | 'mono' | 'duo': one filter for the footage inside the box, one for everything outside it
+let fxIn = 'none';
+let fxOut = 'none';
+const fxBtns = { in: {}, out: {} };
 const buttons = [];
 
 const BTN_COLOR = '#00ff00';
@@ -81,22 +83,32 @@ function buildGui() {
   fxCol.style('flex-direction', 'column');
   fxCol.style('gap', '8px');
   fxCol.style('flex', '1');
-  [['mono', 'Monochrome'], ['duo', 'Duotone']].forEach(([mode, label]) => {
-    const b = createButton(label);
-    b.parent(fxCol);
-    b.style('padding', '10px');
-    b.style('border', 'none');
-    b.style('border-radius', '6px');
-    b.style('background-color', BTN_COLOR);
-    b.style('color', 'black');
-    b.style('font-family', MONO);
-    b.style('font-size', '14px');
-    b.style('cursor', 'pointer');
-    b.mousePressed(() => {
-      fxMode = fxMode === mode ? 'none' : mode; // press again to turn it off
-      updateGui();
+  [['in', 'Inside box'], ['out', 'Outside box']].forEach(([target, heading]) => {
+    const h = createDiv(heading.toUpperCase());
+    h.parent(fxCol);
+    h.style('color', BTN_COLOR);
+    h.style('font-family', MONO);
+    h.style('font-size', '11px');
+    h.style('text-align', 'center');
+    [['mono', 'Monochrome'], ['duo', 'Duotone']].forEach(([mode, label]) => {
+      const b = createButton(label);
+      b.parent(fxCol);
+      b.style('padding', '10px');
+      b.style('border', 'none');
+      b.style('border-radius', '6px');
+      b.style('background-color', BTN_COLOR);
+      b.style('color', 'black');
+      b.style('font-family', MONO);
+      b.style('font-size', '14px');
+      b.style('cursor', 'pointer');
+      b.mousePressed(() => {
+        // press again to turn it off
+        if (target === 'in') fxIn = fxIn === mode ? 'none' : mode;
+        else fxOut = fxOut === mode ? 'none' : mode;
+        updateGui();
+      });
+      fxBtns[target][mode] = b;
     });
-    fxBtns[mode] = b;
   });
 
   FEATURES.forEach((f, idx) => {
@@ -174,7 +186,8 @@ function updateGui() {
   // active feature is full green, the others are dimmed
   buttons.forEach((btn, i) => btn.style('opacity', i === current ? '1' : '0.35'));
   fullBtn.style('opacity', fullView ? '1' : '0.35');
-  for (const m in fxBtns) fxBtns[m].style('opacity', fxMode === m ? '1' : '0.35');
+  for (const m in fxBtns.in) fxBtns.in[m].style('opacity', fxIn === m ? '1' : '0.35');
+  for (const m in fxBtns.out) fxBtns.out[m].style('opacity', fxOut === m ? '1' : '0.35');
   slider.value(sizeToSlider(FEATURES[current].size));
 }
 
@@ -202,11 +215,7 @@ function draw() {
 
   if (fullView) {
     // whole camera view on the main canvas, mirrored, with the current square outlined in green
-    push();
-    translate(width, 0);
-    scale(-1, 1);
-    image(video, 0, 0, width, height);
-    pop();
+    drawFiltered(drawingContext, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, width, height, fxOut);
     if (smoothX === null) {
       drawPreview(vw, vh, null);
       return;
@@ -216,7 +225,8 @@ function draw() {
     const by = b.sy * (height / vh);
     const bw = b.sw * (width / vw);
     const bh = b.sh * (height / vh);
-    drawFiltered(drawingContext, b, bx, by, bw, bh);
+    // redraw the box on top so the outside filter never touches it
+    drawFiltered(drawingContext, b, bx, by, bw, bh, fxIn);
     noFill();
     stroke(BTN_COLOR);
     strokeWeight(2);
@@ -248,14 +258,14 @@ function draw() {
   // project what's inside the square across the whole canvas, mirrored like a selfie view.
   // Uses the canvas API directly so the crop is taken in the camera's true pixel coordinates.
   const ctx = drawingContext;
-  if (fxMode === 'none') {
+  if (fxIn === 'none') {
     ctx.save();
     ctx.translate(width, 0);
     ctx.scale(-1, 1);
     ctx.drawImage(video.elt, sx, sy, sw, sh, 0, 0, width, height);
     ctx.restore();
   } else {
-    drawFiltered(ctx, { sx, sy, sw, sh }, 0, 0, width, height);
+    drawFiltered(ctx, { sx, sy, sw, sh }, 0, 0, width, height, fxIn);
   }
 
   drawPreview(vw, vh, { sx, sy, sw, sh });
@@ -264,16 +274,12 @@ function draw() {
 // small mirrored preview of the full camera (beside the canvas) with the current square outlined
 function drawPreview(vw, vh, box) {
   preview.background(0);
-  preview.push();
-  preview.translate(PREVIEW, 0);
-  preview.scale(-1, 1);
-  preview.image(video, 0, 0, PREVIEW, PREVIEW);
-  preview.pop();
+  drawFiltered(preview.drawingContext, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
 
   if (!box) return;
   const bk = PREVIEW / vw;
   const bkh = PREVIEW / vh;
-  drawFiltered(preview.drawingContext, box, PREVIEW - (box.sx + box.sw) * bk, box.sy * bkh, box.sw * bk, box.sh * bkh);
+  drawFiltered(preview.drawingContext, box, PREVIEW - (box.sx + box.sw) * bk, box.sy * bkh, box.sw * bk, box.sh * bkh, fxIn);
   preview.noFill();
   preview.stroke(BTN_COLOR);
   preview.strokeWeight(2);
@@ -295,24 +301,25 @@ function currentBox(vw, vh, f) {
   };
 }
 
-// Draw the boxed region of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh)
-// of `ctx`, mirrored like the rest of the view, with the current filter applied to just that region.
+// Draw a rect of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh) of `ctx`,
+// mirrored like the rest of the view, with the given filter mode applied to just that region.
 // The filters use canvas blend modes (no per-pixel JavaScript), so they stay fast:
 //   mono: a black fill in "saturation" mode strips the color
 //   duo:  then a #00ff00 fill in "multiply" mode maps black -> black and white -> #00ff00
-function drawFiltered(ctx, box, dx, dy, dw, dh) {
-  if (fxMode === 'none') return;
+function drawFiltered(ctx, box, dx, dy, dw, dh, mode) {
   ctx.save();
   ctx.translate(dx + dw, dy);
   ctx.scale(-1, 1);
   ctx.drawImage(video.elt, box.sx, box.sy, box.sw, box.sh, 0, 0, dw, dh);
-  ctx.globalCompositeOperation = 'saturation';
-  ctx.fillStyle = '#000000';
-  ctx.fillRect(0, 0, dw, dh);
-  if (fxMode === 'duo') {
-    ctx.globalCompositeOperation = 'multiply';
-    ctx.fillStyle = BTN_COLOR;
+  if (mode !== 'none') {
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.fillStyle = '#000000';
     ctx.fillRect(0, 0, dw, dh);
+    if (mode === 'duo') {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = BTN_COLOR;
+      ctx.fillRect(0, 0, dw, dh);
+    }
   }
   ctx.restore();
 }
