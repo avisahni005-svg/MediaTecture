@@ -92,7 +92,7 @@ function buildGui() {
   fullBtn.style('font-size', '14px');
   fullBtn.style('cursor', 'pointer');
   fullBtn.mousePressed(() => {
-    fullView = true;
+    fullView = !fullView; // independent toggle: features can still be switched while it's on
     updateGui();
   });
 
@@ -128,7 +128,6 @@ const sizeToSlider = sliderToSize; // the flip is its own inverse
 
 function select_feature(idx) {
   current = idx;
-  fullView = false;
   smoothX = null; // jump straight to the new feature instead of gliding across the face
   updateGui();
 }
@@ -139,7 +138,7 @@ function cycle(dir) {
 
 function updateGui() {
   // active feature is full green, the others are dimmed
-  buttons.forEach((btn, i) => btn.style('opacity', !fullView && i === current ? '1' : '0.35'));
+  buttons.forEach((btn, i) => btn.style('opacity', i === current ? '1' : '0.35'));
   fullBtn.style('opacity', fullView ? '1' : '0.35');
   slider.value(sizeToSlider(FEATURES[current].size));
 }
