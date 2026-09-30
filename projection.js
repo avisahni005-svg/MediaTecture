@@ -23,7 +23,7 @@ let slider, side;
 let zoom = 1; // magnification of the footage inside the box (1 = none)
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
-let zoomLabel;
+let zoomLabel, zoomSlider;
 let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
 let fullBtn;
 // 'none' | 'mono' | 'duo': one filter for the footage inside the box, one for everything outside it
@@ -69,6 +69,20 @@ function setup() {
 
 function buildGui() {
   // single column of feature buttons, under the preview on the right
+  // randomize: one random feature, a random zoom and a random inside filter (normal / mono / duo)
+  const randomBtn = createButton('Randomize');
+  randomBtn.parent(side);
+  randomBtn.style('width', '100%');
+  randomBtn.style('padding', '10px');
+  randomBtn.style('border', 'none');
+  randomBtn.style('border-radius', '6px');
+  randomBtn.style('background-color', BTN_COLOR);
+  randomBtn.style('color', 'black');
+  randomBtn.style('font-family', MONO);
+  randomBtn.style('font-size', '14px');
+  randomBtn.style('cursor', 'pointer');
+  randomBtn.mousePressed(randomize);
+
   const row = createDiv();
   row.parent(side);
   row.style('display', 'flex');
@@ -181,10 +195,9 @@ function buildGui() {
   zoomBox.style('font-size', '12px');
   zoomLabel = createDiv();
   zoomLabel.parent(zoomBox);
-  const zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, zoom, 0.1);
+  zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, zoom, 0.1);
   zoomSlider.parent(zoomBox);
   zoomSlider.style('width', '100%');
-  const showZoom = () => zoomLabel.html(`ZOOM INSIDE BOX: ${zoom.toFixed(1)}x`);
   zoomSlider.input(() => {
     zoom = zoomSlider.value();
     showZoom();
@@ -199,6 +212,23 @@ function sliderToSize(v) {
   return MIN_SIZE + MAX_SIZE - v;
 }
 const sizeToSlider = sliderToSize; // the flip is its own inverse
+
+function showZoom() {
+  zoomLabel.html(`ZOOM INSIDE BOX: ${zoom.toFixed(1)}x`);
+}
+
+function randomize() {
+  const next = floor(random(FEATURES.length));
+  selected.clear();
+  smooth.fill(null);
+  selected.add(next);
+  current = next;
+  zoom = round(random(MIN_ZOOM, MAX_ZOOM) * 10) / 10;
+  zoomSlider.value(zoom);
+  showZoom();
+  fxIn = random(['none', 'mono', 'duo']);
+  updateGui();
+}
 
 // click a feature to switch it on or off; any number (including none) can be on at once
 function toggle_feature(idx) {
