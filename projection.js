@@ -17,21 +17,16 @@ const FEATURES = [
 const MIN_SIZE = 20;
 const MAX_SIZE = 300;
 const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
-const INSET = 180;      // size of the small full-view preview in the corner
 
 let current = 0;
-let slider;
+let slider, side;
 const buttons = [];
 
-const ON_COLOR = '#2ecc71';
-const OFF_COLOR = '#555555';
+const BTN_COLOR = '#00ff00';
+const MONO = 'monospace';
+const PREVIEW = 240; // size of the small full-camera preview to the right of the canvas
+let preview;
 
-// GUI layout: three columns (indexes into FEATURES)
-const COLUMNS = [
-  { title: 'Left',   features: [0, 2] },
-  { title: 'Center', features: [4, 5] },
-  { title: 'Right',  features: [1, 3] },
-];
 let smoothX = null;
 let smoothY = null;
 
@@ -42,6 +37,15 @@ function preload() {
 function setup() {
   const cnv = createCanvas(800, 800);
   cnv.parent(select('main'));
+  side = createDiv();
+  side.parent(select('main'));
+  side.style('display', 'flex');
+  side.style('flex-direction', 'column');
+  side.style('gap', '16px');
+  side.style('width', PREVIEW + 'px');
+  preview = createGraphics(PREVIEW, PREVIEW);
+  preview.parent(side);
+  preview.show();
   video = createCapture({ video: { width: 800, height: 800 }, audio: false });
   video.size(800, 800);
   video.hide();
@@ -52,62 +56,48 @@ function setup() {
 }
 
 function buildGui() {
-  const gui = createDiv();
-  gui.parent(select('main'));
-  gui.style('display', 'grid');
-  gui.style('grid-template-columns', '1fr 1fr 1fr');
-  gui.style('gap', '12px');
-  gui.style('width', '800px');
-  gui.style('margin-top', '12px');
+  // single column of feature buttons, under the preview on the right
+  const col = createDiv();
+  col.parent(side);
+  col.style('display', 'flex');
+  col.style('flex-direction', 'column');
+  col.style('gap', '8px');
 
-  for (const col of COLUMNS) {
-    const colDiv = createDiv();
-    colDiv.parent(gui);
-    colDiv.style('display', 'flex');
-    colDiv.style('flex-direction', 'column');
-    colDiv.style('gap', '8px');
-
-    const title = createDiv(col.title);
-    title.parent(colDiv);
-    title.style('color', '#ccc');
-    title.style('font-family', 'sans-serif');
-    title.style('text-align', 'center');
-    title.style('text-transform', 'uppercase');
-    title.style('letter-spacing', '2px');
-    title.style('font-size', '12px');
-
-    for (const idx of col.features) {
-      const btn = createButton(FEATURES[idx].label);
-      btn.parent(colDiv);
-      btn.style('padding', '10px');
-      btn.style('border', 'none');
-      btn.style('border-radius', '6px');
-      btn.style('color', 'white');
-      btn.style('font-family', 'sans-serif');
-      btn.style('font-size', '14px');
-      btn.style('cursor', 'pointer');
-      btn.mousePressed(() => select_feature(idx));
-      buttons[idx] = btn;
-    }
-  }
+  FEATURES.forEach((f, idx) => {
+    const btn = createButton(f.label);
+    btn.parent(col);
+    btn.style('padding', '10px');
+    btn.style('border', 'none');
+    btn.style('border-radius', '6px');
+    btn.style('background-color', BTN_COLOR);
+    btn.style('color', 'black');
+    btn.style('font-family', MONO);
+    btn.style('font-size', '14px');
+    btn.style('cursor', 'pointer');
+    btn.mousePressed(() => select_feature(idx));
+    buttons[idx] = btn;
+  });
 
   // size slider (flipped): higher value = smaller box = more zoomed in
-  const sliderRow = createDiv();
-  sliderRow.parent(select('main'));
-  sliderRow.style('width', '800px');
-  sliderRow.style('margin-top', '12px');
-  sliderRow.style('display', 'flex');
-  sliderRow.style('align-items', 'center');
-  sliderRow.style('gap', '10px');
-  sliderRow.style('color', '#ccc');
-  sliderRow.style('font-family', 'sans-serif');
-  sliderRow.style('font-size', '12px');
-  createSpan('BOX SIZE: LARGE').parent(sliderRow);
+  const sliderBox = createDiv();
+  sliderBox.parent(side);
+  sliderBox.style('display', 'flex');
+  sliderBox.style('flex-direction', 'column');
+  sliderBox.style('gap', '4px');
+  sliderBox.style('color', BTN_COLOR);
+  sliderBox.style('font-family', MONO);
+  sliderBox.style('font-size', '12px');
+  createDiv('BOX SIZE').parent(sliderBox);
   slider = createSlider(MIN_SIZE, MAX_SIZE, sizeToSlider(FEATURES[0].size), 1);
-  slider.parent(sliderRow);
-  slider.style('flex', '1');
+  slider.parent(sliderBox);
+  slider.style('width', '100%');
   slider.input(() => (FEATURES[current].size = sliderToSize(slider.value())));
-  createSpan('SMALL').parent(sliderRow);
+  const ends = createDiv();
+  ends.parent(sliderBox);
+  ends.style('display', 'flex');
+  ends.style('justify-content', 'space-between');
+  createSpan('LARGE').parent(ends);
+  createSpan('SMALL').parent(ends);
 
   updateGui();
 }
@@ -129,7 +119,8 @@ function cycle(dir) {
 }
 
 function updateGui() {
-  buttons.forEach((btn, i) => btn.style('background-color', i === current ? ON_COLOR : OFF_COLOR));
+  // active feature is full green, the others are dimmed
+  buttons.forEach((btn, i) => btn.style('opacity', i === current ? '1' : '0.35'));
   slider.value(sizeToSlider(FEATURES[current].size));
 }
 
@@ -169,6 +160,7 @@ function draw() {
     textSize(24);
     textAlign(CENTER, CENTER);
     text(faces.length === 0 ? 'Looking for a face...' : 'Face found, tracking...', width / 2, height / 2);
+    drawPreview(vw, vh, null);
     return;
   }
 
@@ -187,26 +179,24 @@ function draw() {
   ctx.drawImage(video.elt, sx, sy, sw, sh, 0, 0, width, height);
   ctx.restore();
 
-  drawInset(vw, vh, sx, sy, sw, sh);
+  drawPreview(vw, vh, { sx, sy, sw, sh });
 }
 
-// small mirrored preview of the full camera with the current square outlined
-function drawInset(vw, vh, sx, sy, sw, sh) {
-  const m = 16;
-  const ix = width - INSET - m;
-  const iy = height - INSET - m;
-  push();
-  translate(ix + INSET, iy);
-  scale(-1, 1);
-  image(video, 0, 0, INSET, INSET);
-  pop();
+// small mirrored preview of the full camera (beside the canvas) with the current square outlined
+function drawPreview(vw, vh, box) {
+  preview.background(0);
+  preview.push();
+  preview.translate(PREVIEW, 0);
+  preview.scale(-1, 1);
+  preview.image(video, 0, 0, PREVIEW, PREVIEW);
+  preview.pop();
 
-  noFill();
-  stroke(255);
-  strokeWeight(2);
-  const k = INSET / vw;
-  const kh = INSET / vh;
+  if (!box) return;
+  preview.noFill();
+  preview.stroke(255);
+  preview.strokeWeight(2);
+  const k = PREVIEW / vw;
+  const kh = PREVIEW / vh;
   // mirror x to match the flipped preview
-  rect(ix + INSET - (sx + sw) * k, iy + sy * kh, sw * k, sh * kh);
-  rect(ix, iy, INSET, INSET);
+  preview.rect(PREVIEW - (box.sx + box.sw) * k, box.sy * kh, box.sw * k, box.sh * kh);
 }
