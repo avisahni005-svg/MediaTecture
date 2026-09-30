@@ -20,6 +20,10 @@ const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zo
 
 let current = 0;
 let slider, side;
+let zoom = 1; // magnification of the footage inside the box (1 = none)
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 5;
+let zoomLabel;
 let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
 let fullBtn;
 // 'none' | 'mono' | 'duo': one filter for the footage inside the box, one for everything outside it
@@ -163,6 +167,27 @@ function buildGui() {
   createSpan('LARGE').parent(ends);
   createSpan('SMALL').parent(ends);
 
+  // zoom slider: magnifies the footage inside the box (the box itself keeps its size)
+  const zoomBox = createDiv();
+  zoomBox.parent(side);
+  zoomBox.style('display', 'flex');
+  zoomBox.style('flex-direction', 'column');
+  zoomBox.style('gap', '4px');
+  zoomBox.style('color', BTN_COLOR);
+  zoomBox.style('font-family', MONO);
+  zoomBox.style('font-size', '12px');
+  zoomLabel = createDiv();
+  zoomLabel.parent(zoomBox);
+  const zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, zoom, 0.1);
+  zoomSlider.parent(zoomBox);
+  zoomSlider.style('width', '100%');
+  const showZoom = () => zoomLabel.html(`ZOOM INSIDE BOX: ${zoom.toFixed(1)}x`);
+  zoomSlider.input(() => {
+    zoom = zoomSlider.value();
+    showZoom();
+  });
+  showZoom();
+
   updateGui();
 }
 
@@ -226,7 +251,7 @@ function draw() {
     const bw = b.sw * (width / vw);
     const bh = b.sh * (height / vh);
     // redraw the box on top so the outside filter never touches it
-    drawFiltered(drawingContext, b, bx, by, bw, bh, fxIn);
+    drawFiltered(drawingContext, zoomedIn(b), bx, by, bw, bh, fxIn);
     noFill();
     stroke(BTN_COLOR);
     strokeWeight(2);
@@ -262,10 +287,11 @@ function draw() {
     ctx.save();
     ctx.translate(width, 0);
     ctx.scale(-1, 1);
-    ctx.drawImage(video.elt, sx, sy, sw, sh, 0, 0, width, height);
+    const z = zoomedIn({ sx, sy, sw, sh });
+    ctx.drawImage(video.elt, z.sx, z.sy, z.sw, z.sh, 0, 0, width, height);
     ctx.restore();
   } else {
-    drawFiltered(ctx, { sx, sy, sw, sh }, 0, 0, width, height, fxIn);
+    drawFiltered(ctx, zoomedIn({ sx, sy, sw, sh }), 0, 0, width, height, fxIn);
   }
 
   drawPreview(vw, vh, { sx, sy, sw, sh });
@@ -279,7 +305,7 @@ function drawPreview(vw, vh, box) {
   if (!box) return;
   const bk = PREVIEW / vw;
   const bkh = PREVIEW / vh;
-  drawFiltered(preview.drawingContext, box, PREVIEW - (box.sx + box.sw) * bk, box.sy * bkh, box.sw * bk, box.sh * bkh, fxIn);
+  drawFiltered(preview.drawingContext, zoomedIn(box), PREVIEW - (box.sx + box.sw) * bk, box.sy * bkh, box.sw * bk, box.sh * bkh, fxIn);
   preview.noFill();
   preview.stroke(BTN_COLOR);
   preview.strokeWeight(2);
@@ -322,4 +348,11 @@ function drawFiltered(ctx, box, dx, dy, dw, dh, mode) {
     }
   }
   ctx.restore();
+}
+
+// The part of the box that is actually shown: a smaller rect around the same center (zoom 1 = the whole box).
+function zoomedIn(box) {
+  const sw = box.sw / zoom;
+  const sh = box.sh / zoom;
+  return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
 }
