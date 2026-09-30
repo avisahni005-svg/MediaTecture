@@ -24,7 +24,6 @@ let fullView = false; // true = main canvas shows the whole camera view instead 
 let fullBtn;
 let fxMode = 'none'; // 'none' | 'mono' | 'duo': filter applied only to the footage inside the box
 const fxBtns = {};
-let fxBuf;
 const buttons = [];
 
 const BTN_COLOR = '#00ff00';
@@ -298,36 +297,22 @@ function currentBox(vw, vh, f) {
 
 // Draw the boxed region of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh)
 // of `ctx`, mirrored like the rest of the view, with the current filter applied to just that region.
+// The filters use canvas blend modes (no per-pixel JavaScript), so they stay fast:
+//   mono: a black fill in "saturation" mode strips the color
+//   duo:  then a #00ff00 fill in "multiply" mode maps black -> black and white -> #00ff00
 function drawFiltered(ctx, box, dx, dy, dw, dh) {
   if (fxMode === 'none') return;
-  const w = max(1, round(dw));
-  const h = max(1, round(dh));
-  if (!fxBuf) {
-    fxBuf = createGraphics(w, h);
-    fxBuf.pixelDensity(1);
-    fxBuf.hide();
-  }
-  if (fxBuf.width !== w || fxBuf.height !== h) fxBuf.resizeCanvas(w, h);
-
-  fxBuf.drawingContext.drawImage(video.elt, box.sx, box.sy, box.sw, box.sh, 0, 0, w, h);
-  fxBuf.loadPixels();
-  const px = fxBuf.pixels;
-  for (let i = 0; i < px.length; i += 4) {
-    const lum = 0.299 * px[i] + 0.587 * px[i + 1] + 0.114 * px[i + 2];
-    if (fxMode === 'mono') {
-      px[i] = px[i + 1] = px[i + 2] = lum;
-    } else {
-      // duotone: black (shadows) -> #00ff00 (highlights)
-      px[i] = 0;
-      px[i + 1] = lum;
-      px[i + 2] = 0;
-    }
-  }
-  fxBuf.updatePixels();
-
   ctx.save();
   ctx.translate(dx + dw, dy);
   ctx.scale(-1, 1);
-  ctx.drawImage(fxBuf.elt, 0, 0, dw, dh);
+  ctx.drawImage(video.elt, box.sx, box.sy, box.sw, box.sh, 0, 0, dw, dh);
+  ctx.globalCompositeOperation = 'saturation';
+  ctx.fillStyle = '#000000';
+  ctx.fillRect(0, 0, dw, dh);
+  if (fxMode === 'duo') {
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = BTN_COLOR;
+    ctx.fillRect(0, 0, dw, dh);
+  }
   ctx.restore();
 }
