@@ -31,7 +31,8 @@ under Settings > General > Danger Zone > Change visibility, or tell Claude and w
 ## Step 2: every time you use it
 
 1. On the **laptop**, open the sketch address in Chrome. Click **Allow** when it asks for the camera.
-   Only the big canvas is shown. (Press F11, or Cmd+Ctrl+F on a Mac, for full screen.)
+   Only the big canvas is shown, and it fills the whole window in any shape (wide, tall, or square), even if you
+   resize the window. (Press F11, or Cmd+Ctrl+F on a Mac, for full screen.)
 2. On the **iPad**, open the controller address in Safari.
 3. The top line on the iPad says **Connected to the sketch**, the small camera preview appears, and
    everything you tap now changes the laptop.

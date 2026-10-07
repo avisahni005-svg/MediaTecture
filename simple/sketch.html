@@ -8,8 +8,8 @@
     <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
-      html, body { margin: 0; background: #000; height: 100%; overflow: hidden; }
-      main { display: flex; align-items: center; justify-content: center; height: 100%; }
+      html, body { margin: 0; background: #000; width: 100%; height: 100%; overflow: hidden; }
+      main { width: 100vw; height: 100vh; }
       canvas { display: block; }
     </style>
   </head>
@@ -79,7 +79,7 @@ const perms = {};   // featureIndex -> { personId: id of the person whose featur
 // ---- layout / cameras / connection ----
 const BTN_COLOR = '#00ff00';
 const MONO = 'monospace';
-const PREVIEW = 300; // size of the small full-camera preview to the right of the canvas
+const PREVIEW = 300; // width of the small full-camera preview sent to the iPad (its height follows the camera's shape)
 let preview;
 let cameras = [];        // [{ id, label }] for the controller's camera list
 let activeCamera = null;
@@ -96,7 +96,8 @@ function preload() {
 }
 
 function setup() {
-  const cnv = createCanvas(800, 800);
+  pixelDensity(1); // the camera picture is far smaller than a retina screen anyway, and this keeps it fast
+  const cnv = createCanvas(windowWidth, windowHeight);
   cnv.parent(select('main'));
 
   // the small full-camera view lives on the iPad: it is drawn here (hidden) and sent over as pictures
@@ -107,11 +108,17 @@ function setup() {
   connect();
 }
 
+// the canvas always fills the whole window, whatever its shape
+function windowResized() {
+  resizeCanvas(windowWidth, windowHeight);
+}
+
 function draw() {
   background(0);
 
   const vw = video.elt.videoWidth || video.width;
   const vh = video.elt.videoHeight || video.height;
+  const view = coverView(vw, vh);
 
   updatePeople();
 
@@ -129,38 +136,35 @@ function draw() {
     }
   });
 
-  // one box per person per highlighted feature. The box sits on that person's feature, but what it shows
-  // comes from whoever the shuffle assigned (`src`), so features appear to swap between people.
+  // one box per person per highlighted feature. The box sits on that person's feature (`at`), but what it shows
+  // comes from whoever the shuffle assigned (`from`), so features appear to swap between people.
   const boxes = [];
   selected.forEach((idx) => {
     const f = FEATURES[idx];
+    const side = boxSide(vw, vh, f.size);
     for (const t of tracks) {
       const at = smooth[`${t.id}:${idx}`];
       if (!at) continue;
       const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
       const from = smooth[`${fromId}:${idx}`] || at;
-      boxes.push({ ...makeBox(vw, vh, f.size, at), src: makeBox(vw, vh, f.size, from), label: f.label });
+      boxes.push({ at, from, side, label: f.label });
     }
   });
 
   const ctx = drawingContext;
-  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
 
   // whole camera view: when Full View is on, or when no feature is highlighted (no box)
   if (fullView || selected.size === 0) {
-    drawFiltered(ctx, whole, 0, 0, width, height, fxOut);
+    drawFiltered(ctx, view.src, 0, 0, width, height, fxOut);
     for (const b of boxes) {
-      const bx = width - (b.sx + b.sw) * (width / vw);
-      const by = b.sy * (height / vh);
-      const bw = b.sw * (width / vw);
-      const bh = b.sh * (height / vh);
+      const d = view.toCanvas(squareRect(vw, vh, b.at, b.side));
       // redraw the box on top so the outside filter never touches it
-      drawFiltered(ctx, zoomedIn(b.src), bx, by, bw, bh, fxIn);
+      drawFiltered(ctx, zoomedIn(squareRect(vw, vh, b.from, b.side)), d.x, d.y, d.w, d.h, fxIn);
       noFill();
       stroke(BTN_COLOR);
       strokeWeight(2);
-      rect(bx, by, bw, bh);
-      if (showLabels) drawLabel(ctx, b.label, bx + bw / 2, by + bh / 2, 20);
+      rect(d.x, d.y, d.w, d.h);
+      if (showLabels) drawLabel(ctx, b.label, d.x + d.w / 2, d.y + d.h / 2, constrain(Math.min(width, height) / 40, 14, 40));
     }
     maybeSendPreview(vw, vh, boxes);
     return;
@@ -168,7 +172,7 @@ function draw() {
 
   if (boxes.length === 0) {
     // no face yet: show the plain mirrored camera so it's clear the sketch is alive
-    drawFiltered(ctx, whole, 0, 0, width, height, 'none');
+    drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
     fill(0, 160);
     noStroke();
     rect(0, height / 2 - 30, width, 60);
@@ -180,41 +184,83 @@ function draw() {
     return;
   }
 
-  // project each highlighted box onto the canvas: one fills it, several tile it in a centered grid
+  // project each highlighted box onto the screen: one fills it, several tile it so the whole screen is used
   const n = boxes.length;
-  const cols = Math.ceil(Math.sqrt(n));
-  const rows = Math.ceil(n / cols);
-  const cell = width / cols;
+  const g = bestGrid(n, width, height);
   boxes.forEach((b, i) => {
-    const r = Math.floor(i / cols);
-    const c = i % cols;
-    const inRow = Math.min(cols, n - r * cols);
-    const ox = (width - inRow * cell) / 2 + c * cell;
-    const oy = (height - rows * cell) / 2 + r * cell;
-    drawFiltered(ctx, zoomedIn(b.src), ox, oy, cell, cell, fxIn);
-    if (showLabels) drawLabel(ctx, b.label, ox + cell / 2, oy + cell / 2, constrain(cell / 12, 14, 32));
+    const r = Math.floor(i / g.cols);
+    const c = i % g.cols;
+    const inRow = Math.min(g.cols, n - r * g.cols); // the last row may be shorter: center it
+    const ox = (width - inRow * g.cellW) / 2 + c * g.cellW;
+    const oy = r * g.cellH;
+    // show a patch the same shape as the tile (same area as the square box) so nothing is stretched
+    const patch = aspectRect(vw, vh, b.from, b.side, g.cellW / g.cellH);
+    drawFiltered(ctx, zoomedIn(patch), ox, oy, g.cellW, g.cellH, fxIn);
+    if (showLabels) drawLabel(ctx, b.label, ox + g.cellW / 2, oy + g.cellH / 2, constrain(Math.min(g.cellW, g.cellH) / 12, 14, 40));
   });
 
   maybeSendPreview(vw, vh, boxes);
 }
 
-// the square for a feature centered on `pt`, in raw video pixels (canvas size -> video size), kept inside the frame
-function makeBox(vw, vh, size, pt) {
-  const sw = size * (vw / width);
-  const sh = size * (vh / height);
+// How the camera fills the canvas without stretching ("cover": the longer side is cropped).
+//   src:      the part of the camera picture that is visible
+//   toCanvas: where a rect of the camera picture lands on the canvas (mirrored left-right like a selfie view)
+function coverView(vw, vh) {
+  const scale = Math.max(width / vw, height / vh);
+  const ox = (width - vw * scale) / 2;
+  const oy = (height - vh * scale) / 2;
   return {
-    sx: constrain(pt.x - sw / 2, 0, vw - sw),
-    sy: constrain(pt.y - sh / 2, 0, vh - sh),
-    sw,
-    sh,
+    src: { sx: -ox / scale, sy: -oy / scale, sw: width / scale, sh: height / scale },
+    toCanvas: (r) => ({ x: width - (ox + (r.sx + r.sw) * scale), y: oy + r.sy * scale, w: r.sw * scale, h: r.sh * scale }),
   };
+}
+
+// side of a feature's square in camera pixels. `size` is in "800 pixel screen" units, so boxes keep their
+// proportions on any screen.
+function boxSide(vw, vh, size) {
+  return (size * Math.min(vw, vh)) / 800;
+}
+
+// a square of the camera picture centered on `pt`, kept inside the picture
+function squareRect(vw, vh, pt, side) {
+  return {
+    sx: constrain(pt.x - side / 2, 0, vw - side),
+    sy: constrain(pt.y - side / 2, 0, vh - side),
+    sw: side,
+    sh: side,
+  };
+}
+
+// a patch centered on `pt` with the given width/height ratio and the same area as the square box
+function aspectRect(vw, vh, pt, side, aspect) {
+  let sw = side * Math.sqrt(aspect);
+  let sh = side / Math.sqrt(aspect);
+  const k = Math.min(1, vw / sw, vh / sh); // shrink (keeping the shape) if it would stick out of the picture
+  sw *= k;
+  sh *= k;
+  return { sx: constrain(pt.x - sw / 2, 0, vw - sw), sy: constrain(pt.y - sh / 2, 0, vh - sh), sw, sh };
+}
+
+// the tile layout whose tiles are closest to square, so the tiles fill the screen
+function bestGrid(n, W, H) {
+  let best = null;
+  for (let cols = 1; cols <= n; cols++) {
+    const rows = Math.ceil(n / cols);
+    const cellW = W / cols;
+    const cellH = H / rows;
+    const score = Math.abs(Math.log(cellW / cellH));
+    if (!best || score < best.score) best = { cols, rows, cellW, cellH, score };
+  }
+  return best;
 }
 
 // Only while the iPad is connected, about 10 times a second: draw the small preview and send it over as a JPEG.
 function maybeSendPreview(vw, vh, boxes) {
   if (links.size === 0 || millis() - lastPreviewAt < 100) return;
   lastPreviewAt = millis();
-  drawPreview(vw, vh, boxes);
+  const ph = Math.round((PREVIEW * vh) / vw);
+  if (preview.width !== PREVIEW || preview.height !== ph) preview.resizeCanvas(PREVIEW, ph);
+  drawPreview(vw, vh, boxes, ph);
   const img = preview.elt.toDataURL('image/jpeg', 0.6);
   for (const c of links) {
     const backedUp = c.dataChannel && c.dataChannel.bufferedAmount > 200000; // skip frames if the link is behind
@@ -222,24 +268,25 @@ function maybeSendPreview(vw, vh, boxes) {
   }
 }
 
-// small mirrored preview of the full camera (shown on the iPad) with the highlighted squares outlined
-function drawPreview(vw, vh, boxes) {
+// small mirrored preview of the whole camera picture (shown on the iPad) with the highlighted squares outlined
+function drawPreview(vw, vh, boxes, ph) {
   preview.background(0);
   const pctx = preview.drawingContext;
-  drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
+  drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, ph, fxOut);
 
   const k = PREVIEW / vw;
-  const kh = PREVIEW / vh;
-  for (const box of boxes) {
+  for (const b of boxes) {
+    const r = squareRect(vw, vh, b.at, b.side);
     // mirror x to match the flipped preview
-    const x = PREVIEW - (box.sx + box.sw) * k;
-    const y = box.sy * kh;
-    drawFiltered(pctx, zoomedIn(box.src), x, y, box.sw * k, box.sh * kh, fxIn);
+    const x = PREVIEW - (r.sx + r.sw) * k;
+    const y = r.sy * k;
+    const w = r.sw * k;
+    drawFiltered(pctx, zoomedIn(squareRect(vw, vh, b.from, b.side)), x, y, w, w, fxIn);
     preview.noFill();
     preview.stroke(BTN_COLOR);
     preview.strokeWeight(2);
-    preview.rect(x, y, box.sw * k, box.sh * kh);
-    if (showLabels) drawLabel(pctx, box.label, x + (box.sw * k) / 2, y + (box.sh * kh) / 2, 11);
+    preview.rect(x, y, w, w);
+    if (showLabels) drawLabel(pctx, b.label, x + w / 2, y + w / 2, 11);
   }
 }
 
@@ -438,7 +485,7 @@ function startCamera(deviceId) {
   tracks.length = 0; // everyone is re-detected from the new camera
   peopleKey = '';
   clearSmooth();
-  const constraints = { video: { width: 800, height: 800 }, audio: false };
+  const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
   if (deviceId) constraints.video.deviceId = { exact: deviceId };
   const vid = createCapture(constraints, listCameras);
   video = vid;

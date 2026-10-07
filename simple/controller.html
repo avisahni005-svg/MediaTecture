@@ -67,8 +67,8 @@ function setup() {
   // the small full-camera view (drawn on the laptop, sent over as pictures)
   previewImg = createImg('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'camera preview').parent(root);
   previewImg.style('width', '100%');
-  previewImg.style('max-width', '360px');
-  previewImg.style('aspect-ratio', '1 / 1');
+  previewImg.style('max-width', '420px');
+  previewImg.style('height', 'auto'); // follows the shape of the camera picture
   previewImg.style('background', '#000');
   previewImg.style('align-self', 'center');
   previewImg.style('border', '2px solid #00ff00');
