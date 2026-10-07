@@ -2,8 +2,8 @@
 
 Two web pages that talk to each other directly over the internet (using PeerJS):
 
-- `sketch.html` runs on the **laptop**: webcam, face tracking, the big canvas. It shows a 4-letter **pairing code** and a QR code.
-- `controller.html` runs on the **iPad**: all the buttons and sliders.
+- `sketch.html` runs on the **laptop**: webcam, face tracking, and the big canvas. The page shows nothing else (no text, no QR code).
+- `controller.html` runs on the **iPad**: the small camera preview, all the buttons and sliders.
 
 You do not install anything and you do not use the terminal. The pages just need to be hosted on a web address
 (step 1), and both devices need internet.
@@ -31,19 +31,21 @@ under Settings > General > Danger Zone > Change visibility, or tell Claude and w
 ## Step 2: every time you use it
 
 1. On the **laptop**, open the sketch address in Chrome. Click **Allow** when it asks for the camera.
-   The right side of the page shows a **4-letter code** and a **QR code**.
-2. On the **iPad**, either:
-   - point the iPad camera at the QR code on the laptop screen and tap the link that appears, or
-   - open the controller address in Safari, type the 4-letter code, and tap **Connect**.
-3. The top line on the iPad turns to **Connected to the sketch**. Everything you tap now changes the laptop.
+   Only the big canvas is shown. (Press F11, or Cmd+Ctrl+F on a Mac, for full screen.)
+2. On the **iPad**, open the controller address in Safari.
+3. The top line on the iPad says **Connected to the sketch**, the small camera preview appears, and
+   everything you tap now changes the laptop.
 
-The code stays the same when you refresh the laptop page, and the iPad remembers it, so next time you can
-just open the controller address.
+The two pages find each other with a built-in pairing code, so there is nothing to type. If you want to keep
+other people from connecting, add your own secret word to the end of both addresses, the same on both:
+
+- Laptop: `.../simple/sketch.html#mysecretword`
+- iPad: `.../simple/controller.html#mysecretword`
 
 ## If something goes wrong
 
-- **"Can't find a sketch with code ..."**: the laptop page isn't open, or the code was typed wrong.
+- **"Can't find the sketch"** on the iPad: the laptop page isn't open yet, or the two addresses use different secret words.
 - **Stuck on "Connecting..."**: some Wi-Fi networks (school or office ones) block the direct link. Try a phone hotspot.
-- **Red bar at the top of the laptop page**: a library didn't load. Check the internet connection.
+- **Red bar at the top of the laptop page**: a library didn't load. Check the internet connection. (The bar only appears when something is wrong.)
 - **No camera picture**: make sure you opened the `https://` address (not a file on disk) and clicked Allow.
 - **The page looks old after you change something**: do a hard refresh (Cmd+Shift+R on a Mac).

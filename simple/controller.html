@@ -41,11 +41,14 @@ const MAX_ZOOM = 5;
 
 let peer;         // our end of the PeerJS link
 let conn;         // the link to the sketch on the laptop
-let wantedCode = '';
+// Same pairing code as the sketch page, so the connection happens on its own.
+// To use your own code, put it in both addresses: sketch.html#MYCODE and controller.html#MYCODE.
+const DEFAULT_CODE = 'FP-X7K2Q9M4';
+const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
+let previewImg;
 let retryTimer;
 let problem = '';
 let linked = false;
-let codeInput;
 let state = null; // what the sketch last reported
 let sketchStatus = { people: 0, cameras: [], activeCamera: null };
 
@@ -61,17 +64,15 @@ function setup() {
 
   infoLine = createDiv('Connecting...').class('info').parent(root);
 
-  // pairing code row: type the code shown on the laptop
-  const codeRow = createDiv().class('cols').parent(root);
-  codeInput = createInput('').parent(codeRow);
-  codeInput.attribute('placeholder', 'CODE');
-  codeInput.attribute('maxlength', '4');
-  codeInput.attribute('autocapitalize', 'characters');
-  codeInput.attribute('autocomplete', 'off');
-  codeInput.elt.style.cssText = 'flex:1;min-width:0;padding:14px;font:20px monospace;letter-spacing:6px;text-align:center;text-transform:uppercase;border-radius:8px;border:2px solid #00ff00;background:#000;color:#00ff00';
-  const goBtn = createButton('Connect').class('btn').parent(codeRow);
-  goBtn.elt.style.flex = '1';
-  tap(goBtn, () => linkTo(codeInput.value()));
+  // the small full-camera view (drawn on the laptop, sent over as pictures)
+  previewImg = createImg('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'camera preview').parent(root);
+  previewImg.style('width', '100%');
+  previewImg.style('max-width', '360px');
+  previewImg.style('aspect-ratio', '1 / 1');
+  previewImg.style('background', '#000');
+  previewImg.style('align-self', 'center');
+  previewImg.style('border', '2px solid #00ff00');
+  previewImg.style('box-sizing', 'border-box');
 
   camSelect = createSelect().parent(root);
   camSelect.changed(() => send({ name: 'setCamera', id: camSelect.value() }));
@@ -158,7 +159,7 @@ function render() {
     infoLine.html('Connected to the sketch');
     infoLine.removeClass('bad');
   } else {
-    infoLine.html(problem || (wantedCode ? 'Connecting...' : 'Type the 4-letter code shown on the laptop, then tap Connect.'));
+    infoLine.html(problem || 'Connecting to the sketch... (open sketch.html on the laptop)');
     infoLine.addClass('bad');
   }
 
@@ -193,21 +194,11 @@ function render() {
 
 function start() {
   peer = new Peer();
-  peer.on('open', () => {
-    // the code can come from the QR link (controller.html#ABCD) or from last time
-    let saved = location.hash.slice(1);
-    try { saved = saved || localStorage.getItem('faceproj-code') || ''; } catch (e) {}
-    if (saved) {
-      codeInput.value(saved.toUpperCase());
-      linkTo(saved);
-    } else {
-      render();
-    }
-  });
+  peer.on('open', () => linkTo());
   peer.on('disconnected', () => peer.reconnect());
   peer.on('error', (err) => {
     if (err.type === 'peer-unavailable') {
-      problem = `Can't find a sketch with code ${wantedCode}. Is the laptop page open? Is the code right?`;
+      problem = "Can't find the sketch. Is sketch.html open on the laptop?";
       retry();
     } else {
       problem = 'Connection problem: ' + err.type;
@@ -216,15 +207,12 @@ function start() {
   });
 }
 
-function linkTo(code) {
-  code = String(code).trim().toUpperCase();
-  if (!code || !peer || !peer.open) return;
-  try { localStorage.setItem('faceproj-code', code); } catch (e) {}
-  wantedCode = code;
+function linkTo() {
+  if (!peer || !peer.open) return;
   problem = '';
   clearTimeout(retryTimer);
   if (conn) conn.close();
-  conn = peer.connect('faceproj-' + code, { reliable: true });
+  conn = peer.connect('faceproj-' + PAIRING_CODE, { reliable: true });
   conn.on('open', () => {
     linked = true;
     problem = '';
@@ -232,6 +220,10 @@ function linkTo(code) {
   });
   conn.on('data', (m) => {
     if (!m) return;
+    if (m.type === 'frame') {
+      previewImg.elt.src = m.img; // only the picture changes, no need to redraw the controls
+      return;
+    }
     if (m.type === 'state') state = m.state;
     if (m.type === 'status') sketchStatus = m.status;
     render();
@@ -248,7 +240,7 @@ function linkTo(code) {
 // keep trying, e.g. if the laptop page was refreshed
 function retry() {
   clearTimeout(retryTimer);
-  retryTimer = setTimeout(() => wantedCode && linkTo(wantedCode), 2500);
+  retryTimer = setTimeout(linkTo, 2500);
 }
     </script>
   </body>

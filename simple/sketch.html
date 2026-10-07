@@ -7,28 +7,28 @@
     <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
     <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
     <style>
-      html, body { margin: 0; background: #111; }
-      main { display: flex; flex-direction: row; align-items: flex-start; justify-content: center; gap: 20px; padding: 20px; }
+      html, body { margin: 0; background: #000; height: 100%; overflow: hidden; }
+      main { display: flex; align-items: center; justify-content: center; height: 100%; }
+      canvas { display: block; }
     </style>
   </head>
   <body>
     <main></main>
-    <div id="status" style="position:fixed;top:0;left:0;right:0;padding:6px 10px;background:#333;color:#fff;font:13px sans-serif;z-index:9">Loading libraries...</div>
+    <div id="status" style="display:none;position:fixed;top:0;left:0;right:0;padding:6px 10px;background:#a00;color:#fff;font:13px sans-serif;z-index:9"></div>
     <script>
-      // show problems on the page itself, since the console may not be visible
+      // the page shows nothing but the canvas; this red bar only appears if something breaks
       const statusEl = document.getElementById('status');
+      function showProblem(text) {
+        statusEl.textContent = text;
+        statusEl.style.display = 'block';
+      }
       window.addEventListener('error', (e) => {
-        statusEl.style.background = '#a00';
-        statusEl.textContent = 'Error: ' + e.message + (e.target && e.target.src ? ' (' + e.target.src + ')' : '');
+        showProblem('Error: ' + e.message + (e.target && e.target.src ? ' (' + e.target.src + ')' : ''));
       }, true);
       window.addEventListener('load', () => {
         if (typeof p5 === 'undefined' || typeof ml5 === 'undefined' || typeof Peer === 'undefined') {
-          statusEl.style.background = '#a00';
-          statusEl.textContent = 'Could not load ' + (typeof p5 === 'undefined' ? 'p5' : typeof ml5 === 'undefined' ? 'ml5' : 'PeerJS') + ' from the CDN (check internet / blocked scripts).';
-        } else {
-          statusEl.textContent = 'Libraries loaded. Allow camera access when asked...';
+          showProblem('Could not load ' + (typeof p5 === 'undefined' ? 'p5' : typeof ml5 === 'undefined' ? 'ml5' : 'PeerJS') + ' from the CDN (check internet / blocked scripts).');
         }
       });
     </script>
@@ -80,12 +80,16 @@ const perms = {};   // featureIndex -> { personId: id of the person whose featur
 const BTN_COLOR = '#00ff00';
 const MONO = 'monospace';
 const PREVIEW = 300; // size of the small full-camera preview to the right of the canvas
-let preview, hint, qrBox;
+let preview;
 let cameras = [];        // [{ id, label }] for the controller's camera list
 let activeCamera = null;
 let peer;                // PeerJS connection point; the iPad connects to it using the pairing code
 const links = new Set(); // open connections to controllers (normally just the iPad)
-let pairingCode = '';
+// Both pages use the same pairing code, so the iPad connects on its own. Put your own code in the web address
+// (sketch.html#MYCODE on the laptop, controller.html#MYCODE on the iPad) to keep other people out.
+const DEFAULT_CODE = 'FP-X7K2Q9M4';
+const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
+let lastPreviewAt = 0;
 
 function preload() {
   faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE });
@@ -94,51 +98,13 @@ function preload() {
 function setup() {
   const cnv = createCanvas(800, 800);
   cnv.parent(select('main'));
-  const side = createDiv();
-  side.parent(select('main'));
-  side.style('display', 'flex');
-  side.style('flex-direction', 'column');
-  side.style('gap', '16px');
-  side.style('width', PREVIEW + 'px');
+
+  // the small full-camera view lives on the iPad: it is drawn here (hidden) and sent over as pictures
   preview = createGraphics(PREVIEW, PREVIEW);
-  preview.parent(side);
-  preview.show();
-
-  hint = createDiv();
-  hint.parent(side);
-  hint.style('color', BTN_COLOR);
-  hint.style('font-family', MONO);
-  hint.style('font-size', '13px');
-  hint.style('line-height', '1.5');
-
-  qrBox = createDiv();
-  qrBox.parent(side);
-  qrBox.style('background', '#fff');
-  qrBox.style('padding', '10px');
-  qrBox.style('width', '140px');
-  qrBox.style('height', '140px');
+  preview.pixelDensity(1);
 
   startCamera(null); // null = the browser's default camera; the controller can pick another
-  const st = document.getElementById('status');
-  if (st) st.remove();
-
   connect();
-  showHint();
-}
-
-// the address of the controller page (it sits next to this page), with the pairing code on the end
-function controllerUrl() {
-  return location.href.split('#')[0].replace(/[^/]*$/, '') + 'controller.html#' + pairingCode;
-}
-
-function showHint() {
-  const state = !peer || !peer.open ? 'starting...' : links.size > 0 ? 'iPad connected' : 'waiting for the iPad';
-  hint.html(`PAIRING CODE<br><span style="font-size:36px;letter-spacing:6px">${pairingCode || '....'}</span><br><br>On the iPad: scan the square below with the camera, or open controller.html and type the code<br><br>${state}`);
-}
-
-function drawQr() {
-  qrBox.html('');
-  if (typeof QRCode !== 'undefined') new QRCode(qrBox.elt, { text: controllerUrl(), width: 140, height: 140 });
 }
 
 function draw() {
@@ -196,7 +162,7 @@ function draw() {
       rect(bx, by, bw, bh);
       if (showLabels) drawLabel(ctx, b.label, bx + bw / 2, by + bh / 2, 20);
     }
-    drawPreview(vw, vh, boxes);
+    maybeSendPreview(vw, vh, boxes);
     return;
   }
 
@@ -210,7 +176,7 @@ function draw() {
     textSize(24);
     textAlign(CENTER, CENTER);
     text('Looking for a face...', width / 2, height / 2);
-    drawPreview(vw, vh, boxes);
+    maybeSendPreview(vw, vh, boxes);
     return;
   }
 
@@ -229,7 +195,7 @@ function draw() {
     if (showLabels) drawLabel(ctx, b.label, ox + cell / 2, oy + cell / 2, constrain(cell / 12, 14, 32));
   });
 
-  drawPreview(vw, vh, boxes);
+  maybeSendPreview(vw, vh, boxes);
 }
 
 // the square for a feature centered on `pt`, in raw video pixels (canvas size -> video size), kept inside the frame
@@ -244,7 +210,19 @@ function makeBox(vw, vh, size, pt) {
   };
 }
 
-// small mirrored preview of the full camera (beside the canvas) with the highlighted squares outlined
+// Only while the iPad is connected, about 10 times a second: draw the small preview and send it over as a JPEG.
+function maybeSendPreview(vw, vh, boxes) {
+  if (links.size === 0 || millis() - lastPreviewAt < 100) return;
+  lastPreviewAt = millis();
+  drawPreview(vw, vh, boxes);
+  const img = preview.elt.toDataURL('image/jpeg', 0.6);
+  for (const c of links) {
+    const backedUp = c.dataChannel && c.dataChannel.bufferedAmount > 200000; // skip frames if the link is behind
+    if (c.open && !backedUp) c.send({ type: 'frame', img });
+  }
+}
+
+// small mirrored preview of the full camera (shown on the iPad) with the highlighted squares outlined
 function drawPreview(vw, vh, boxes) {
   preview.background(0);
   const pctx = preview.drawingContext;
@@ -522,31 +500,15 @@ function publishStatus() {
   send({ type: 'status', status: { people: tracks.length, cameras, activeCamera } });
 }
 
-// a 4-letter code (no look-alike letters) that stays the same when the page is refreshed
-function loadCode(fresh) {
-  let code = null;
-  try { if (!fresh) code = localStorage.getItem('faceproj-code'); } catch (e) {}
-  if (!code) {
-    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
-    code = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
-    try { localStorage.setItem('faceproj-code', code); } catch (e) {}
-  }
-  return code;
-}
-
-function connect(fresh) {
-  pairingCode = loadCode(fresh);
-  peer = new Peer('faceproj-' + pairingCode);
-  peer.on('open', () => {
-    drawQr();
-    showHint();
-  });
+function connect() {
+  peer = new Peer('faceproj-' + PAIRING_CODE);
   peer.on('error', (err) => {
     if (err.type === 'unavailable-id') {
+      // the code is still held by an older copy of this page (e.g. just refreshed): try again in a moment
       peer.destroy();
-      connect(true); // somebody else has this code right now: pick another
+      setTimeout(connect, 2000);
     } else {
-      hint.html('Connection problem: ' + err.type);
+      console.warn('Connection problem:', err.type);
     }
   });
   peer.on('disconnected', () => peer.reconnect());
@@ -555,15 +517,11 @@ function connect(fresh) {
       links.add(conn);
       publishState();
       publishStatus();
-      showHint();
     });
     conn.on('data', (m) => {
       if (m && m.type === 'cmd') applyCommand(m.cmd);
     });
-    const gone = () => {
-      links.delete(conn);
-      showHint();
-    };
+    const gone = () => links.delete(conn);
     conn.on('close', gone);
     conn.on('error', gone);
   });
