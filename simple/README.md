@@ -43,6 +43,15 @@ other people from connecting, add your own secret word to the end of both addres
 - Laptop: `.../simple/sketch.html#mysecretword`
 - iPad: `.../simple/controller.html#mysecretword`
 
+## Body Trace
+
+The **Body Trace** button (top of the right column on the iPad) turns the laptop picture into a mosaic of tiles that
+fills your outline. The feature buttons choose what the tiles show: with only Right Eye on, every tile is a right eye;
+with Right Eye and Nose on, the tiles are a random mix of the two; with none on, all six features are mixed.
+The first time you press it the body model has to download, so the button says "loading model..." for a few seconds
+and the laptop shows the normal camera until the outline is ready. The zoom slider and the inside filters apply to the
+tiles too.
+
 ## If something goes wrong
 
 - **"Can't find the sketch"** on the iPad: the laptop page isn't open yet, or the two addresses use different secret words.

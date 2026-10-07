@@ -64,6 +64,7 @@ const MODES = ['none', 'mono', 'duo'];
 let current = 0; // the feature whose size the controller's slider edits (last one switched on)
 const selected = new Set([0]); // features can be highlighted together (or none at all)
 let zoom = 1;                  // magnification of the footage inside the box (1 = none)
+let bodyTrace = false;         // fill the person's silhouette with a mosaic of the highlighted features
 let fullView = false;          // true = main canvas shows the whole camera view instead of the zoomed features
 let showLabels = false;        // write each highlighted feature's name in the center of its box
 let fxIn = 'none';             // 'none' | 'mono' | 'duo': filter for the footage inside the boxes
@@ -90,6 +91,18 @@ const links = new Set(); // open connections to controllers (normally just the i
 const DEFAULT_CODE = 'FP-X7K2Q9M4';
 const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
 let lastPreviewAt = 0;
+
+// ---- body trace (mosaic) ----
+const MOSAIC_TILES = 28; // how many tiles fit across the shorter side of the screen
+const SEG_WIDTH = 256;   // the body model looks at a small copy of the picture (fast), this wide
+let bodySeg = null;      // ml5 body segmentation model, only loaded the first time Body Trace is switched on
+let bodySegReady = false;
+let bodySegRunning = false;
+let segCanvas = null;    // the small picture the body model looks at
+let latestMask = null;   // newest silhouette: ImageData in the camera's own (unmirrored) orientation
+let maskPersonOpaque = true; // which way round the mask is: is the person the opaque part? (worked out live)
+let mosaicCells = [];    // one remembered random choice per tile: { fi: feature index, pid: person id }
+let mosaicKey = '';
 
 function preload() {
   faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE });
@@ -122,8 +135,9 @@ function draw() {
 
   updatePeople();
 
-  // follow every highlighted feature on every person in frame
-  selected.forEach((idx) => {
+  // follow every highlighted feature on every person in frame (for Body Trace with nothing highlighted: all of them)
+  const inUse = bodyTrace && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
+  inUse.forEach((idx) => {
     const f = FEATURES[idx];
     for (const t of tracks) {
       const p = f.center(t.face);
@@ -152,6 +166,13 @@ function draw() {
   });
 
   const ctx = drawingContext;
+
+  // body trace: the person's silhouette filled with a mosaic of the highlighted features
+  if (bodyTrace) {
+    drawBodyTrace(ctx, vw, vh, view, inUse);
+    maybeSendPreview(vw, vh, boxes);
+    return;
+  }
 
   // whole camera view: when Full View is on, or when no feature is highlighted (no box)
   if (fullView || selected.size === 0) {
@@ -202,6 +223,100 @@ function draw() {
   maybeSendPreview(vw, vh, boxes);
 }
 
+// ---- body trace ----
+
+// Switch Body Trace on or off. The body model is big, so it is only loaded (and only runs) while it is on.
+function setBodyTrace(on) {
+  bodyTrace = on;
+  if (!on) {
+    if (bodySegRunning) bodySeg.detectStop();
+    bodySegRunning = false;
+    return;
+  }
+  if (!bodySeg) {
+    bodySeg = ml5.bodySegmentation('SelfieSegmentation', { maskType: 'background' }, () => {
+      bodySegReady = true;
+      publishState(); // the controller stops showing "loading"
+    });
+  }
+}
+
+// Give the body model a small copy of the camera picture, start it if needed, and keep the silhouette fresh.
+function feedBodyModel(vw, vh) {
+  const h = Math.round((SEG_WIDTH * vh) / vw);
+  if (!segCanvas) segCanvas = document.createElement('canvas');
+  if (segCanvas.width !== SEG_WIDTH || segCanvas.height !== h) {
+    segCanvas.width = SEG_WIDTH;
+    segCanvas.height = h;
+  }
+  segCanvas.getContext('2d').drawImage(video.elt, 0, 0, SEG_WIDTH, h);
+  if (bodySegReady && !bodySegRunning) {
+    bodySegRunning = true;
+    bodySeg.detectStart(segCanvas, (result) => {
+      if (result && result.maskImageData) latestMask = result.maskImageData;
+    });
+  }
+}
+
+function drawBodyTrace(ctx, vw, vh, view, inUse) {
+  feedBodyModel(vw, vh);
+
+  // until the first silhouette arrives (the model is still loading) just show the camera
+  if (!latestMask) {
+    drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
+    return;
+  }
+
+  // The mask can come either way round (person opaque or background opaque). We know where a person is: their
+  // nose. Whatever the mask says at the nose is "person".
+  const mw = latestMask.width;
+  const mh = latestMask.height;
+  const alphaAt = (vx, vy) => {
+    const x = constrain(Math.floor((vx / vw) * mw), 0, mw - 1);
+    const y = constrain(Math.floor((vy / vh) * mh), 0, mh - 1);
+    return latestMask.data[(y * mw + x) * 4 + 3];
+  };
+  if (tracks.length > 0) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
+  const isPerson = (vx, vy) => alphaAt(vx, vy) > 127 === maskPersonOpaque;
+
+  const T = Math.max(16, Math.round(Math.min(width, height) / MOSAIC_TILES));
+  const cols = Math.ceil(width / T);
+  const rows = Math.ceil(height / T);
+  if (mosaicKey !== `${cols}x${rows}`) {
+    mosaicKey = `${cols}x${rows}`;
+    mosaicCells = Array.from({ length: cols * rows }, () => ({ fi: -1, pid: -1 }));
+  }
+  const feats = [...inUse];
+  const reach = T * 0.3;
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const cx = c * T + T / 2;
+      const cy = r * T + T / 2;
+      // a tile counts as body when most of 5 sample points inside it are on the person
+      let hits = 0;
+      for (const [dx, dy] of [[0, 0], [-reach, -reach], [reach, -reach], [-reach, reach], [reach, reach]]) {
+        const vx = (width - (cx + dx) - view.ox) / view.scale; // undo the mirroring and the cover scaling
+        const vy = (cy + dy - view.oy) / view.scale;
+        if (isPerson(vx, vy)) hits++;
+      }
+      if (hits < 3) continue;
+
+      // each tile picks a random highlighted feature of a random person, and now and then picks again
+      const cell = mosaicCells[r * cols + c];
+      const stale = cell.fi < 0 || !feats.includes(cell.fi) || !tracks.some((t) => t.id === cell.pid);
+      if (stale || Math.random() < 0.012) {
+        cell.fi = feats[Math.floor(Math.random() * feats.length)];
+        cell.pid = tracks.length ? tracks[Math.floor(Math.random() * tracks.length)].id : -1;
+      }
+      const at = smooth[`${cell.pid}:${cell.fi}`];
+      if (!at) continue;
+      const patch = zoomedIn(squareRect(vw, vh, at, boxSide(vw, vh, FEATURES[cell.fi].size)));
+      drawFiltered(ctx, patch, c * T + 1, r * T + 1, T - 2, T - 2, fxIn);
+    }
+  }
+}
+
 // How the camera fills the canvas without stretching ("cover": the longer side is cropped).
 //   src:      the part of the camera picture that is visible
 //   toCanvas: where a rect of the camera picture lands on the canvas (mirrored left-right like a selfie view)
@@ -210,6 +325,9 @@ function coverView(vw, vh) {
   const ox = (width - vw * scale) / 2;
   const oy = (height - vh * scale) / 2;
   return {
+    scale,
+    ox,
+    oy,
     src: { sx: -ox / scale, sy: -oy / scale, sw: width / scale, sh: height / scale },
     toCanvas: (r) => ({ x: width - (ox + (r.sx + r.sw) * scale), y: oy + r.sy * scale, w: r.sw * scale, h: r.sh * scale }),
   };
@@ -445,6 +563,9 @@ function applyCommand(c) {
     case 'setZoom':
       if (isFinite(c.value)) zoom = constrain(Number(c.value), MIN_ZOOM, MAX_ZOOM);
       break;
+    case 'toggleBodyTrace':
+      setBodyTrace(!bodyTrace);
+      break;
     case 'toggleFull':
       fullView = !fullView;
       break;
@@ -541,6 +662,8 @@ function publishState() {
       current,
       zoom,
       fullView,
+      bodyTrace,
+      bodyLoading: bodyTrace && !bodySegReady,
       showLabels,
       fxIn,
       fxOut,
