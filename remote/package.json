@@ -1,0 +1,12 @@
+{
+  "name": "face-projection-remote",
+  "version": "1.0.0",
+  "description": "Relay that lets an iPad (controller) drive the face projection sketch running on a laptop",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
