@@ -1,0 +1,573 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Face Projection (Sketch)</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+    <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <style>
+      html, body { margin: 0; background: #111; }
+      main { display: flex; flex-direction: row; align-items: flex-start; justify-content: center; gap: 20px; padding: 20px; }
+    </style>
+  </head>
+  <body>
+    <main></main>
+    <div id="status" style="position:fixed;top:0;left:0;right:0;padding:6px 10px;background:#333;color:#fff;font:13px sans-serif;z-index:9">Loading libraries...</div>
+    <script>
+      // show problems on the page itself, since the console may not be visible
+      const statusEl = document.getElementById('status');
+      window.addEventListener('error', (e) => {
+        statusEl.style.background = '#a00';
+        statusEl.textContent = 'Error: ' + e.message + (e.target && e.target.src ? ' (' + e.target.src + ')' : '');
+      }, true);
+      window.addEventListener('load', () => {
+        if (typeof p5 === 'undefined' || typeof ml5 === 'undefined' || typeof Peer === 'undefined') {
+          statusEl.style.background = '#a00';
+          statusEl.textContent = 'Could not load ' + (typeof p5 === 'undefined' ? 'p5' : typeof ml5 === 'undefined' ? 'ml5' : 'PeerJS') + ' from the CDN (check internet / blocked scripts).';
+        } else {
+          statusEl.textContent = 'Libraries loaded. Allow camera access when asked...';
+        }
+      });
+    </script>
+    <script>
+let video;
+let faceMesh;
+let faces = [];
+
+// Each feature is a fixed-size square region of the video.
+// "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
+// Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
+// The ORDER matters: the controller refers to features by their index here.
+const FEATURES = [
+  { label: 'Left Eye',      size: 100, center: (f) => f.leftEye },
+  { label: 'Right Eye',     size: 100, center: (f) => f.rightEye },
+  { label: 'Left Eyebrow',  size: 110, center: (f) => f.leftEyebrow },
+  { label: 'Right Eyebrow', size: 110, center: (f) => f.rightEyebrow },
+  { label: 'Nose',          size: 90,  center: (f) => f.keypoints[1] },
+  { label: 'Mouth',         size: 130, center: (f) => f.lips },
+];
+
+const MIN_SIZE = 20;
+const MAX_SIZE = 300;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 5;
+const RANDOM_MAX_ZOOM = 2.5; // Randomize only picks zooms up to this
+const MAX_PEOPLE = 4;        // how many faces are tracked at once
+const GRACE_MS = 800;        // a person who drops out of detection for this long counts as gone
+const SMOOTHING = 0.35;      // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
+const MODES = ['none', 'mono', 'duo'];
+
+// ---- what the controller changes ----
+let current = 0; // the feature whose size the controller's slider edits (last one switched on)
+const selected = new Set([0]); // features can be highlighted together (or none at all)
+let zoom = 1;                  // magnification of the footage inside the box (1 = none)
+let fullView = false;          // true = main canvas shows the whole camera view instead of the zoomed features
+let showLabels = false;        // write each highlighted feature's name in the center of its box
+let fxIn = 'none';             // 'none' | 'mono' | 'duo': filter for the footage inside the boxes
+let fxOut = 'none';            // ...and for everything outside them
+
+// ---- people ----
+const smooth = {}; // smoothed position per person+feature, keyed 'personId:featureIndex'
+const tracks = []; // everyone currently in frame: { id, x, y, face, lastSeen }
+let nextPersonId = 1;
+let peopleKey = ''; // which people are in frame; when it changes the features get shuffled between them
+const perms = {};   // featureIndex -> { personId: id of the person whose feature is shown on them }
+
+// ---- layout / cameras / connection ----
+const BTN_COLOR = '#00ff00';
+const MONO = 'monospace';
+const PREVIEW = 300; // size of the small full-camera preview to the right of the canvas
+let preview, hint, qrBox;
+let cameras = [];        // [{ id, label }] for the controller's camera list
+let activeCamera = null;
+let peer;                // PeerJS connection point; the iPad connects to it using the pairing code
+const links = new Set(); // open connections to controllers (normally just the iPad)
+let pairingCode = '';
+
+function preload() {
+  faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE });
+}
+
+function setup() {
+  const cnv = createCanvas(800, 800);
+  cnv.parent(select('main'));
+  const side = createDiv();
+  side.parent(select('main'));
+  side.style('display', 'flex');
+  side.style('flex-direction', 'column');
+  side.style('gap', '16px');
+  side.style('width', PREVIEW + 'px');
+  preview = createGraphics(PREVIEW, PREVIEW);
+  preview.parent(side);
+  preview.show();
+
+  hint = createDiv();
+  hint.parent(side);
+  hint.style('color', BTN_COLOR);
+  hint.style('font-family', MONO);
+  hint.style('font-size', '13px');
+  hint.style('line-height', '1.5');
+
+  qrBox = createDiv();
+  qrBox.parent(side);
+  qrBox.style('background', '#fff');
+  qrBox.style('padding', '10px');
+  qrBox.style('width', '140px');
+  qrBox.style('height', '140px');
+
+  startCamera(null); // null = the browser's default camera; the controller can pick another
+  const st = document.getElementById('status');
+  if (st) st.remove();
+
+  connect();
+  showHint();
+}
+
+// the address of the controller page (it sits next to this page), with the pairing code on the end
+function controllerUrl() {
+  return location.href.split('#')[0].replace(/[^/]*$/, '') + 'controller.html#' + pairingCode;
+}
+
+function showHint() {
+  const state = !peer || !peer.open ? 'starting...' : links.size > 0 ? 'iPad connected' : 'waiting for the iPad';
+  hint.html(`PAIRING CODE<br><span style="font-size:36px;letter-spacing:6px">${pairingCode || '....'}</span><br><br>On the iPad: scan the square below with the camera, or open controller.html and type the code<br><br>${state}`);
+}
+
+function drawQr() {
+  qrBox.html('');
+  if (typeof QRCode !== 'undefined') new QRCode(qrBox.elt, { text: controllerUrl(), width: 140, height: 140 });
+}
+
+function draw() {
+  background(0);
+
+  const vw = video.elt.videoWidth || video.width;
+  const vh = video.elt.videoHeight || video.height;
+
+  updatePeople();
+
+  // follow every highlighted feature on every person in frame
+  selected.forEach((idx) => {
+    const f = FEATURES[idx];
+    for (const t of tracks) {
+      const p = f.center(t.face);
+      if (!p) continue;
+      const px = p.centerX !== undefined ? p.centerX : p.x;
+      const py = p.centerY !== undefined ? p.centerY : p.y;
+      const key = `${t.id}:${idx}`;
+      const prev = smooth[key];
+      smooth[key] = prev ? { x: lerp(prev.x, px, SMOOTHING), y: lerp(prev.y, py, SMOOTHING) } : { x: px, y: py };
+    }
+  });
+
+  // one box per person per highlighted feature. The box sits on that person's feature, but what it shows
+  // comes from whoever the shuffle assigned (`src`), so features appear to swap between people.
+  const boxes = [];
+  selected.forEach((idx) => {
+    const f = FEATURES[idx];
+    for (const t of tracks) {
+      const at = smooth[`${t.id}:${idx}`];
+      if (!at) continue;
+      const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
+      const from = smooth[`${fromId}:${idx}`] || at;
+      boxes.push({ ...makeBox(vw, vh, f.size, at), src: makeBox(vw, vh, f.size, from), label: f.label });
+    }
+  });
+
+  const ctx = drawingContext;
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  // whole camera view: when Full View is on, or when no feature is highlighted (no box)
+  if (fullView || selected.size === 0) {
+    drawFiltered(ctx, whole, 0, 0, width, height, fxOut);
+    for (const b of boxes) {
+      const bx = width - (b.sx + b.sw) * (width / vw);
+      const by = b.sy * (height / vh);
+      const bw = b.sw * (width / vw);
+      const bh = b.sh * (height / vh);
+      // redraw the box on top so the outside filter never touches it
+      drawFiltered(ctx, zoomedIn(b.src), bx, by, bw, bh, fxIn);
+      noFill();
+      stroke(BTN_COLOR);
+      strokeWeight(2);
+      rect(bx, by, bw, bh);
+      if (showLabels) drawLabel(ctx, b.label, bx + bw / 2, by + bh / 2, 20);
+    }
+    drawPreview(vw, vh, boxes);
+    return;
+  }
+
+  if (boxes.length === 0) {
+    // no face yet: show the plain mirrored camera so it's clear the sketch is alive
+    drawFiltered(ctx, whole, 0, 0, width, height, 'none');
+    fill(0, 160);
+    noStroke();
+    rect(0, height / 2 - 30, width, 60);
+    fill(255);
+    textSize(24);
+    textAlign(CENTER, CENTER);
+    text('Looking for a face...', width / 2, height / 2);
+    drawPreview(vw, vh, boxes);
+    return;
+  }
+
+  // project each highlighted box onto the canvas: one fills it, several tile it in a centered grid
+  const n = boxes.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const cell = width / cols;
+  boxes.forEach((b, i) => {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const inRow = Math.min(cols, n - r * cols);
+    const ox = (width - inRow * cell) / 2 + c * cell;
+    const oy = (height - rows * cell) / 2 + r * cell;
+    drawFiltered(ctx, zoomedIn(b.src), ox, oy, cell, cell, fxIn);
+    if (showLabels) drawLabel(ctx, b.label, ox + cell / 2, oy + cell / 2, constrain(cell / 12, 14, 32));
+  });
+
+  drawPreview(vw, vh, boxes);
+}
+
+// the square for a feature centered on `pt`, in raw video pixels (canvas size -> video size), kept inside the frame
+function makeBox(vw, vh, size, pt) {
+  const sw = size * (vw / width);
+  const sh = size * (vh / height);
+  return {
+    sx: constrain(pt.x - sw / 2, 0, vw - sw),
+    sy: constrain(pt.y - sh / 2, 0, vh - sh),
+    sw,
+    sh,
+  };
+}
+
+// small mirrored preview of the full camera (beside the canvas) with the highlighted squares outlined
+function drawPreview(vw, vh, boxes) {
+  preview.background(0);
+  const pctx = preview.drawingContext;
+  drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
+
+  const k = PREVIEW / vw;
+  const kh = PREVIEW / vh;
+  for (const box of boxes) {
+    // mirror x to match the flipped preview
+    const x = PREVIEW - (box.sx + box.sw) * k;
+    const y = box.sy * kh;
+    drawFiltered(pctx, zoomedIn(box.src), x, y, box.sw * k, box.sh * kh, fxIn);
+    preview.noFill();
+    preview.stroke(BTN_COLOR);
+    preview.strokeWeight(2);
+    preview.rect(x, y, box.sw * k, box.sh * kh);
+    if (showLabels) drawLabel(pctx, box.label, x + (box.sw * k) / 2, y + (box.sh * kh) / 2, 11);
+  }
+}
+
+// Draw a rect of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh) of `ctx`,
+// mirrored like the rest of the view, with the given filter mode applied to just that region.
+// The filters use canvas blend modes (no per-pixel JavaScript), so they stay fast:
+//   mono: a black fill in "saturation" mode strips the color
+//   duo:  then a #00ff00 fill in "multiply" mode maps black -> black and white -> #00ff00
+function drawFiltered(ctx, box, dx, dy, dw, dh, mode) {
+  ctx.save();
+  ctx.translate(dx + dw, dy);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video.elt, box.sx, box.sy, box.sw, box.sh, 0, 0, dw, dh);
+  if (mode !== 'none') {
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, dw, dh);
+    if (mode === 'duo') {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = BTN_COLOR;
+      ctx.fillRect(0, 0, dw, dh);
+    }
+  }
+  ctx.restore();
+}
+
+// Feature name in plain white monospace, centered on (cx, cy).
+function drawLabel(ctx, text, cx, cy, size) {
+  ctx.save();
+  ctx.font = `${size}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
+}
+
+// The part of the box that is actually shown: a smaller rect around the same center (zoom 1 = the whole box).
+function zoomedIn(box) {
+  const sw = box.sw / zoom;
+  const sh = box.sh / zoom;
+  return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
+}
+
+// ---- several people ----
+
+function clearSmooth(idx) {
+  for (const k in smooth) if (idx === undefined || k.endsWith(`:${idx}`)) delete smooth[k];
+}
+
+// Match this frame's faces to the people seen before (nearest nose position), add newcomers, drop people who left.
+function updatePeople() {
+  const vw = video.elt.videoWidth || video.width;
+  const maxMove = vw * 0.25; // a face further than this from every known person is someone new
+  const used = new Set();
+  for (const face of faces) {
+    const nose = face.keypoints && face.keypoints[1];
+    if (!nose) continue;
+    let best = null;
+    let bestDist = maxMove;
+    for (const t of tracks) {
+      if (used.has(t)) continue;
+      const d = dist(nose.x, nose.y, t.x, t.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = t;
+      }
+    }
+    if (!best) {
+      best = { id: nextPersonId++ };
+      tracks.push(best);
+    }
+    Object.assign(best, { x: nose.x, y: nose.y, face, lastSeen: millis() });
+    used.add(best);
+  }
+
+  for (let i = tracks.length - 1; i >= 0; i--) {
+    if (millis() - tracks[i].lastSeen > GRACE_MS) {
+      for (const k in smooth) if (k.startsWith(`${tracks[i].id}:`)) delete smooth[k];
+      tracks.splice(i, 1);
+    }
+  }
+  tracks.sort((a, b) => a.id - b.id);
+
+  const key = tracks.map((t) => t.id).join(',');
+  if (key !== peopleKey) {
+    peopleKey = key; // someone arrived or left: switch the features around
+    shuffleFeatures();
+    publishStatus();
+  }
+}
+
+// For every feature, hand each person someone else's version of it (a random rotation, so nobody keeps their own).
+function shuffleFeatures() {
+  const ids = tracks.map((t) => t.id);
+  FEATURES.forEach((_, idx) => {
+    const map = {};
+    const shift = ids.length > 1 ? floor(random(1, ids.length)) : 0;
+    ids.forEach((id, i) => (map[id] = ids[(i + shift) % ids.length]));
+    perms[idx] = map;
+  });
+}
+
+// ---- actions (the controller triggers these) ----
+
+// switch a feature on or off; any number (including none) can be on at once
+function toggleFeature(idx) {
+  if (selected.has(idx)) {
+    selected.delete(idx);
+    if (current === idx && selected.size > 0) current = [...selected].pop();
+  } else {
+    selected.add(idx);
+    clearSmooth(idx); // jump straight to the face instead of gliding in from an old position
+    current = idx;
+  }
+}
+
+// one random feature, a random zoom, a random inside filter and labels on or off
+function randomize() {
+  const next = floor(random(FEATURES.length));
+  selected.clear();
+  clearSmooth();
+  selected.add(next);
+  current = next;
+  zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
+  fxIn = random(MODES);
+  showLabels = random() < 0.5;
+  shuffleFeatures();
+}
+
+// arrow keys / space (on the laptop): jump to a single feature
+function cycle(dir) {
+  const next = (current + dir + FEATURES.length) % FEATURES.length;
+  selected.clear();
+  clearSmooth();
+  selected.add(next);
+  current = next;
+  publishState();
+}
+
+function keyPressed() {
+  if (keyCode === RIGHT_ARROW || key === ' ') cycle(1);
+  if (keyCode === LEFT_ARROW) cycle(-1);
+}
+
+function applyCommand(c) {
+  if (!c || typeof c.name !== 'string') return;
+  const validIdx = Number.isInteger(c.idx) && c.idx >= 0 && c.idx < FEATURES.length;
+  switch (c.name) {
+    case 'toggleFeature':
+      if (validIdx) toggleFeature(c.idx);
+      break;
+    case 'setSize':
+      if (validIdx && isFinite(c.value)) FEATURES[c.idx].size = constrain(Number(c.value), MIN_SIZE, MAX_SIZE);
+      break;
+    case 'setZoom':
+      if (isFinite(c.value)) zoom = constrain(Number(c.value), MIN_ZOOM, MAX_ZOOM);
+      break;
+    case 'toggleFull':
+      fullView = !fullView;
+      break;
+    case 'toggleLabels':
+      showLabels = !showLabels;
+      break;
+    case 'setFxIn':
+      if (MODES.includes(c.mode)) fxIn = c.mode;
+      break;
+    case 'setFxOut':
+      if (MODES.includes(c.mode)) fxOut = c.mode;
+      break;
+    case 'randomize':
+      randomize();
+      break;
+    case 'shuffle':
+      shuffleFeatures();
+      break;
+    case 'setCamera':
+      if (typeof c.id === 'string' && c.id !== activeCamera) startCamera(c.id);
+      break;
+  }
+  publishState();
+}
+
+// ---- cameras ----
+
+// (Re)start the webcam on a specific camera and point face tracking at it.
+// Every camera switch builds a fresh faceMesh model: re-pointing one running model at a new video
+// is unreliable (its loop can die on the old, stopped stream), which left tracking dead on the new camera.
+function startCamera(deviceId) {
+  const firstStart = !video;
+  if (video) {
+    faceMesh.detectStop();
+    video.remove(); // also stops the old camera stream
+  }
+  faces = [];
+  tracks.length = 0; // everyone is re-detected from the new camera
+  peopleKey = '';
+  clearSmooth();
+  const constraints = { video: { width: 800, height: 800 }, audio: false };
+  if (deviceId) constraints.video.deviceId = { exact: deviceId };
+  const vid = createCapture(constraints, listCameras);
+  video = vid;
+  vid.size(800, 800);
+  vid.hide();
+
+  const startTracking = () => {
+    if (vid !== video) return; // the user already switched to another camera
+    const model = faceMesh;
+    model.detectStart(vid, (results) => {
+      if (model === faceMesh) faces = results; // ignore results from an old model
+    });
+  };
+  if (firstStart) {
+    startTracking(); // the model loaded in preload()
+  } else {
+    faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE }, startTracking);
+  }
+}
+
+// Collect every connected camera for the controller's list. Names only appear once camera permission
+// is granted, which is why this runs after the first stream starts.
+async function listCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  const stream = video && video.elt.srcObject;
+  const track = stream && stream.getVideoTracks()[0];
+  activeCamera = track ? track.getSettings().deviceId : null;
+  cameras = devices.map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+  publishStatus();
+  publishState();
+}
+if (navigator.mediaDevices) {
+  navigator.mediaDevices.addEventListener('devicechange', () => video && listCameras()); // e.g. plugging in a webcam
+}
+
+// ---- talking to the iPad (PeerJS: a direct browser-to-browser link, no server of our own) ----
+
+function send(msg) {
+  for (const c of links) if (c.open) c.send(msg);
+}
+
+function publishState() {
+  send({
+    type: 'state',
+    state: {
+      features: FEATURES.map((f) => ({ label: f.label, size: f.size })),
+      selected: [...selected],
+      current,
+      zoom,
+      fullView,
+      showLabels,
+      fxIn,
+      fxOut,
+    },
+  });
+}
+
+function publishStatus() {
+  send({ type: 'status', status: { people: tracks.length, cameras, activeCamera } });
+}
+
+// a 4-letter code (no look-alike letters) that stays the same when the page is refreshed
+function loadCode(fresh) {
+  let code = null;
+  try { if (!fresh) code = localStorage.getItem('faceproj-code'); } catch (e) {}
+  if (!code) {
+    const letters = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    code = Array.from({ length: 4 }, () => letters[Math.floor(Math.random() * letters.length)]).join('');
+    try { localStorage.setItem('faceproj-code', code); } catch (e) {}
+  }
+  return code;
+}
+
+function connect(fresh) {
+  pairingCode = loadCode(fresh);
+  peer = new Peer('faceproj-' + pairingCode);
+  peer.on('open', () => {
+    drawQr();
+    showHint();
+  });
+  peer.on('error', (err) => {
+    if (err.type === 'unavailable-id') {
+      peer.destroy();
+      connect(true); // somebody else has this code right now: pick another
+    } else {
+      hint.html('Connection problem: ' + err.type);
+    }
+  });
+  peer.on('disconnected', () => peer.reconnect());
+  peer.on('connection', (conn) => {
+    conn.on('open', () => {
+      links.add(conn);
+      publishState();
+      publishStatus();
+      showHint();
+    });
+    conn.on('data', (m) => {
+      if (m && m.type === 'cmd') applyCommand(m.cmd);
+    });
+    const gone = () => {
+      links.delete(conn);
+      showHint();
+    };
+    conn.on('close', gone);
+    conn.on('error', gone);
+  });
+}
+    </script>
+  </body>
+</html>
