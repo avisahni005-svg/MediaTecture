@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Face Projection (Controller)</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+      html, body { margin: 0; background: #111; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+      main { max-width: 560px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+      .info { color: #00ff00; font-family: monospace; font-size: 13px; text-align: center; }
+      .info.bad { color: #ff5555; }
+      .btn, select {
+        width: 100%; box-sizing: border-box; padding: 16px 10px; border: none; border-radius: 8px;
+        background: #00ff00; color: #000; font-family: monospace; font-size: 16px; cursor: pointer;
+      }
+      select { padding: 14px 10px; }
+      .cols { display: flex; gap: 10px; align-items: flex-start; }
+      .col { flex: 1; display: flex; flex-direction: column; gap: 10px; }
+      .heading { color: #00ff00; font-family: monospace; font-size: 12px; text-align: center; margin-top: 4px; }
+      .slider-box { color: #00ff00; font-family: monospace; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
+      .slider-box input { width: 100%; height: 36px; }
+      .ends { display: flex; justify-content: space-between; font-size: 12px; }
+    </style>
+  </head>
+  <body>
+    <main></main>
+    <script>
+// The iPad side: all the buttons and sliders. It sends commands straight to the sketch on the laptop
+// (a direct browser-to-browser link made with PeerJS, using the pairing code) and redraws itself from the
+// state the sketch sends back, so it always shows what is really happening.
+
+// Same order as FEATURES in sketch.html (features are referred to by index).
+const FEATURE_LABELS = ['Left Eye', 'Right Eye', 'Left Eyebrow', 'Right Eyebrow', 'Nose', 'Mouth'];
+
+const MIN_SIZE = 20;
+const MAX_SIZE = 300;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 5;
+
+let peer;         // our end of the PeerJS link
+let conn;         // the link to the sketch on the laptop
+let wantedCode = '';
+let retryTimer;
+let problem = '';
+let linked = false;
+let codeInput;
+let state = null; // what the sketch last reported
+let sketchStatus = { people: 0, cameras: [], activeCamera: null };
+
+let infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
+const featBtns = [];
+const fxBtns = { in: {}, out: {} };
+let cameraListKey = '';
+const dragging = new Set(); // sliders being dragged right now (don't fight the user's finger)
+
+function setup() {
+  noCanvas();
+  const root = select('main');
+
+  infoLine = createDiv('Connecting...').class('info').parent(root);
+
+  // pairing code row: type the code shown on the laptop
+  const codeRow = createDiv().class('cols').parent(root);
+  codeInput = createInput('').parent(codeRow);
+  codeInput.attribute('placeholder', 'CODE');
+  codeInput.attribute('maxlength', '4');
+  codeInput.attribute('autocapitalize', 'characters');
+  codeInput.attribute('autocomplete', 'off');
+  codeInput.elt.style.cssText = 'flex:1;min-width:0;padding:14px;font:20px monospace;letter-spacing:6px;text-align:center;text-transform:uppercase;border-radius:8px;border:2px solid #00ff00;background:#000;color:#00ff00';
+  const goBtn = createButton('Connect').class('btn').parent(codeRow);
+  goBtn.elt.style.flex = '1';
+  tap(goBtn, () => linkTo(codeInput.value()));
+
+  camSelect = createSelect().parent(root);
+  camSelect.changed(() => send({ name: 'setCamera', id: camSelect.value() }));
+
+  tap(createButton('Randomize').class('btn').parent(root), () => send({ name: 'randomize' }));
+  shuffleBtn = createButton('Shuffle Features').class('btn').parent(root);
+  tap(shuffleBtn, () => send({ name: 'shuffle' }));
+
+  const cols = createDiv().class('cols').parent(root);
+
+  // first column: one button per feature, then Full View
+  const featCol = createDiv().class('col').parent(cols);
+  FEATURE_LABELS.forEach((label, idx) => {
+    const b = createButton(label).class('btn').parent(featCol);
+    tap(b, () => send({ name: 'toggleFeature', idx }));
+    featBtns[idx] = b;
+  });
+  fullBtn = createButton('Full View').class('btn').parent(featCol);
+  tap(fullBtn, () => send({ name: 'toggleFull' }));
+
+  // second column: labels, then the inside / outside filters
+  const fxCol = createDiv().class('col').parent(cols);
+  labelsBtn = createButton('Labels').class('btn').parent(fxCol);
+  tap(labelsBtn, () => send({ name: 'toggleLabels' }));
+  [['in', 'INSIDE BOX', 'setFxIn'], ['out', 'OUTSIDE BOX', 'setFxOut']].forEach(([target, heading, cmd]) => {
+    createDiv(heading).class('heading').parent(fxCol);
+    [['mono', 'Monochrome'], ['duo', 'Duotone']].forEach(([mode, label]) => {
+      const b = createButton(label).class('btn').parent(fxCol);
+      // pressing the active filter again turns it off
+      tap(b, () => {
+        if (!state) return;
+        const now = target === 'in' ? state.fxIn : state.fxOut;
+        send({ name: cmd, mode: now === mode ? 'none' : mode });
+      });
+      fxBtns[target][mode] = b;
+    });
+  });
+
+  // box size slider (flipped: higher value = smaller box = more zoomed in)
+  const sizeBox = createDiv().class('slider-box').parent(root);
+  sizeLabel = createDiv('BOX SIZE').parent(sizeBox);
+  sizeSlider = createSlider(MIN_SIZE, MAX_SIZE, MIN_SIZE + MAX_SIZE - 100, 1).parent(sizeBox);
+  const ends = createDiv().class('ends').parent(sizeBox);
+  createSpan('LARGE').parent(ends);
+  createSpan('SMALL').parent(ends);
+  sizeSlider.input(() => {
+    if (state) send({ name: 'setSize', idx: state.current, value: MIN_SIZE + MAX_SIZE - sizeSlider.value() });
+  });
+  holdWhileDragging(sizeSlider, 'size');
+
+  // zoom slider
+  const zoomBox = createDiv().class('slider-box').parent(root);
+  zoomLabel = createDiv('ZOOM INSIDE BOX').parent(zoomBox);
+  zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, MIN_ZOOM, 0.1).parent(zoomBox);
+  zoomSlider.input(() => send({ name: 'setZoom', value: zoomSlider.value() }));
+  holdWhileDragging(zoomSlider, 'zoom');
+
+  start();
+  render();
+}
+
+// plain click listener: reliable for taps on iPad
+function tap(el, fn) {
+  el.elt.addEventListener('click', fn);
+}
+
+function holdWhileDragging(slider, name) {
+  const down = () => dragging.add(name);
+  const up = () => dragging.delete(name);
+  slider.elt.addEventListener('pointerdown', down);
+  slider.elt.addEventListener('touchstart', down, { passive: true });
+  window.addEventListener('pointerup', up);
+  window.addEventListener('touchend', up);
+  window.addEventListener('pointercancel', up);
+}
+
+function send(cmd) {
+  if (conn && conn.open) conn.send({ type: 'cmd', cmd });
+}
+
+// draw everything from the latest state
+function render() {
+  if (linked) {
+    infoLine.html('Connected to the sketch');
+    infoLine.removeClass('bad');
+  } else {
+    infoLine.html(problem || (wantedCode ? 'Connecting...' : 'Type the 4-letter code shown on the laptop, then tap Connect.'));
+    infoLine.addClass('bad');
+  }
+
+  const n = sketchStatus.people;
+  shuffleBtn.html(`Shuffle Features (${n} ${n === 1 ? 'person' : 'people'})`);
+
+  // camera list: only rebuilt when it changes, so an open dropdown doesn't snap shut
+  const key = JSON.stringify(sketchStatus.cameras);
+  if (key !== cameraListKey) {
+    cameraListKey = key;
+    camSelect.elt.innerHTML = '';
+    sketchStatus.cameras.forEach((c) => camSelect.option(c.label, c.id));
+    if (sketchStatus.cameras.length === 0) camSelect.option('No camera found yet', '');
+  }
+  if (sketchStatus.activeCamera) camSelect.selected(sketchStatus.activeCamera);
+
+  if (!state) return;
+  const dim = (btn, on) => btn.style('opacity', on ? '1' : '0.35');
+  featBtns.forEach((b, i) => dim(b, state.selected.includes(i)));
+  dim(fullBtn, state.fullView);
+  dim(labelsBtn, state.showLabels);
+  for (const m in fxBtns.in) dim(fxBtns.in[m], state.fxIn === m);
+  for (const m in fxBtns.out) dim(fxBtns.out[m], state.fxOut === m);
+
+  sizeLabel.html(`BOX SIZE: ${state.features[state.current].label.toUpperCase()}`);
+  if (!dragging.has('size')) sizeSlider.value(MIN_SIZE + MAX_SIZE - state.features[state.current].size);
+  zoomLabel.html(`ZOOM INSIDE BOX: ${state.zoom.toFixed(1)}x`);
+  if (!dragging.has('zoom')) zoomSlider.value(state.zoom);
+}
+
+// ---- the link to the laptop (PeerJS: a direct browser-to-browser connection) ----
+
+function start() {
+  peer = new Peer();
+  peer.on('open', () => {
+    // the code can come from the QR link (controller.html#ABCD) or from last time
+    let saved = location.hash.slice(1);
+    try { saved = saved || localStorage.getItem('faceproj-code') || ''; } catch (e) {}
+    if (saved) {
+      codeInput.value(saved.toUpperCase());
+      linkTo(saved);
+    } else {
+      render();
+    }
+  });
+  peer.on('disconnected', () => peer.reconnect());
+  peer.on('error', (err) => {
+    if (err.type === 'peer-unavailable') {
+      problem = `Can't find a sketch with code ${wantedCode}. Is the laptop page open? Is the code right?`;
+      retry();
+    } else {
+      problem = 'Connection problem: ' + err.type;
+    }
+    render();
+  });
+}
+
+function linkTo(code) {
+  code = String(code).trim().toUpperCase();
+  if (!code || !peer || !peer.open) return;
+  try { localStorage.setItem('faceproj-code', code); } catch (e) {}
+  wantedCode = code;
+  problem = '';
+  clearTimeout(retryTimer);
+  if (conn) conn.close();
+  conn = peer.connect('faceproj-' + code, { reliable: true });
+  conn.on('open', () => {
+    linked = true;
+    problem = '';
+    render();
+  });
+  conn.on('data', (m) => {
+    if (!m) return;
+    if (m.type === 'state') state = m.state;
+    if (m.type === 'status') sketchStatus = m.status;
+    render();
+  });
+  conn.on('close', () => {
+    linked = false;
+    problem = 'Lost the connection. Reconnecting...';
+    retry();
+    render();
+  });
+  render();
+}
+
+// keep trying, e.g. if the laptop page was refreshed
+function retry() {
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => wantedCode && linkTo(wantedCode), 2500);
+}
+    </script>
+  </body>
+</html>
