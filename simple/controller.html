@@ -38,6 +38,8 @@
       .slider-box input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3em; height: 3em; margin-top: -1.1em; border-radius: 50%; background: #00ff00; border: 3px solid #000; box-shadow: 0 0 0 2px #00ff00; }
       .slider-box input[type=range]::-moz-range-track { height: 0.8em; background: #0b5f0b; border-radius: 1em; }
       .slider-box input[type=range]::-moz-range-thumb { width: 3em; height: 3em; box-sizing: border-box; border-radius: 50%; background: #00ff00; border: 3px solid #000; box-shadow: 0 0 0 2px #00ff00; }
+      .btnrow { flex: 0 0 auto; display: flex; gap: 8px; }
+      .btnrow .btn.fixed { flex: 1 1 0; min-width: 0; }
       .btn.fixed { flex: 0 0 auto; padding: 1.1em 6px; }
       .ends { display: flex; justify-content: space-between; font-size: 0.8em; }
     </style>
@@ -72,7 +74,7 @@ let linked = false;
 let state = null; // what the sketch last reported
 let sketchStatus = { people: 0, cameras: [], activeCamera: null };
 
-let tileLabel, tileSlider, bodyBtn, infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
+let screenBtn, tileLabel, tileSlider, bodyBtn, infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
 const featBtns = [];
 const fxBtns = { in: {}, out: {} };
 let cameraListKey = '';
@@ -127,8 +129,12 @@ function setup() {
   const right = createDiv().class('col').parent(layout);
 
   // body trace: the person's silhouette filled with a mosaic of the highlighted features
-  bodyBtn = createButton('Body Trace').class('btn fixed').parent(right);
+  // (and Screen Trace: the same mosaic over the whole screen)
+  const traceRow = createDiv().class('btnrow').parent(right);
+  bodyBtn = createButton('Body Trace').class('btn fixed').parent(traceRow);
   tap(bodyBtn, () => send({ name: 'toggleBodyTrace' }));
+  screenBtn = createButton('Screen Trace').class('btn fixed').parent(traceRow);
+  tap(screenBtn, () => send({ name: 'toggleScreenTrace' }));
 
   // box size (flipped: higher value = smaller box = more zoomed in)
   const sizeBox = createDiv().class('slider-box').parent(right);
@@ -213,6 +219,7 @@ function render() {
   featBtns.forEach((b, i) => dim(b, state.selected.includes(i)));
   dim(fullBtn, state.fullView);
   dim(bodyBtn, state.bodyTrace);
+  dim(screenBtn, state.screenTrace);
   bodyBtn.html(state.bodyLoading ? 'Body Trace (loading model...)' : 'Body Trace');
   dim(labelsBtn, state.showLabels);
   for (const m in fxBtns.in) dim(fxBtns.in[m], state.fxIn === m);

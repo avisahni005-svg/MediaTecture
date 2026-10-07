@@ -52,6 +52,10 @@ The first time you press it the body model has to download, so the button says "
 and the laptop shows the normal camera until the outline is ready. The zoom slider and the inside filters apply to the
 tiles too.
 
+**Screen Trace** (next to Body Trace) uses the same mosaic but fills the whole screen instead of only your outline.
+It needs no body model, so it starts instantly. Only one of the two can be on at a time, and the Tile Size slider
+works for both.
+
 ## If something goes wrong
 
 - **"Can't find the sketch"** on the iPad: the laptop page isn't open yet, or the two addresses use different secret words.

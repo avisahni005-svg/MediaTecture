@@ -65,6 +65,7 @@ let current = 0; // the feature whose size the controller's slider edits (last o
 const selected = new Set([0]); // features can be highlighted together (or none at all)
 let zoom = 1;                  // magnification of the footage inside the box (1 = none)
 let bodyTrace = false;         // fill the person's silhouette with a mosaic of the highlighted features
+let screenTrace = false;       // fill the whole screen with that mosaic
 let fullView = false;          // true = main canvas shows the whole camera view instead of the zoomed features
 let showLabels = false;        // write each highlighted feature's name in the center of its box
 let fxIn = 'none';             // 'none' | 'mono' | 'duo': filter for the footage inside the boxes
@@ -138,7 +139,7 @@ function draw() {
   updatePeople();
 
   // follow every highlighted feature on every person in frame (for Body Trace with nothing highlighted: all of them)
-  const inUse = bodyTrace && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
+  const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
   inUse.forEach((idx) => {
     const f = FEATURES[idx];
     for (const t of tracks) {
@@ -169,9 +170,9 @@ function draw() {
 
   const ctx = drawingContext;
 
-  // body trace: the person's silhouette filled with a mosaic of the highlighted features
-  if (bodyTrace) {
-    drawBodyTrace(ctx, vw, vh, view, inUse);
+  // mosaic: the person's silhouette (Body Trace) or the whole screen (Screen Trace) filled with the highlighted features
+  if (bodyTrace || screenTrace) {
+    drawMosaic(ctx, vw, vh, view, inUse);
     maybeSendPreview(vw, vh, boxes);
     return;
   }
@@ -230,6 +231,7 @@ function draw() {
 // Switch Body Trace on or off. The body model is big, so it is only loaded (and only runs) while it is on.
 function setBodyTrace(on) {
   bodyTrace = on;
+  if (on) screenTrace = false; // one mosaic mode at a time
   if (!on) {
     if (bodySegRunning) bodySeg.detectStop();
     bodySegRunning = false;
@@ -241,6 +243,12 @@ function setBodyTrace(on) {
       publishState(); // the controller stops showing "loading"
     });
   }
+}
+
+// Screen Trace: the same mosaic, but over the whole screen. It needs no body model.
+function setScreenTrace(on) {
+  screenTrace = on;
+  if (on) setBodyTrace(false);
 }
 
 // Give the body model a small copy of the camera picture, start it if needed, and keep the silhouette fresh.
@@ -260,26 +268,30 @@ function feedBodyModel(vw, vh) {
   }
 }
 
-function drawBodyTrace(ctx, vw, vh, view, inUse) {
-  feedBodyModel(vw, vh);
+function drawMosaic(ctx, vw, vh, view, inUse) {
+  // Body Trace only paints tiles that lie on the person; Screen Trace paints every tile.
+  let isPerson = () => true;
+  if (!screenTrace) {
+    feedBodyModel(vw, vh);
 
-  // until the first silhouette arrives (the model is still loading) just show the camera
-  if (!latestMask) {
-    drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
-    return;
+    // until the first silhouette arrives (the model is still loading) just show the camera
+    if (!latestMask) {
+      drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
+      return;
+    }
+
+    // The mask can come either way round (person opaque or background opaque). We know where a person is: their
+    // nose. Whatever the mask says at the nose is "person".
+    const mw = latestMask.width;
+    const mh = latestMask.height;
+    const alphaAt = (vx, vy) => {
+      const x = constrain(Math.floor((vx / vw) * mw), 0, mw - 1);
+      const y = constrain(Math.floor((vy / vh) * mh), 0, mh - 1);
+      return latestMask.data[(y * mw + x) * 4 + 3];
+    };
+    if (tracks.length > 0) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
+    isPerson = (vx, vy) => alphaAt(vx, vy) > 127 === maskPersonOpaque;
   }
-
-  // The mask can come either way round (person opaque or background opaque). We know where a person is: their
-  // nose. Whatever the mask says at the nose is "person".
-  const mw = latestMask.width;
-  const mh = latestMask.height;
-  const alphaAt = (vx, vy) => {
-    const x = constrain(Math.floor((vx / vw) * mw), 0, mw - 1);
-    const y = constrain(Math.floor((vy / vh) * mh), 0, mh - 1);
-    return latestMask.data[(y * mw + x) * 4 + 3];
-  };
-  if (tracks.length > 0) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
-  const isPerson = (vx, vy) => alphaAt(vx, vy) > 127 === maskPersonOpaque;
 
   const T = Math.max(8, Math.round((tileSize * Math.min(width, height)) / 800));
   const cols = Math.ceil(width / T);
@@ -290,17 +302,18 @@ function drawBodyTrace(ctx, vw, vh, view, inUse) {
   }
   const feats = [...inUse];
   const reach = T * 0.3;
+  let drawn = 0;
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const cx = c * T + T / 2;
       const cy = r * T + T / 2;
       // a tile counts as body when most of 5 sample points inside it are on the person
-      let hits = 0;
+      let hits = screenTrace ? 5 : 0;
       for (const [dx, dy] of [[0, 0], [-reach, -reach], [reach, -reach], [-reach, reach], [reach, reach]]) {
         const vx = (width - (cx + dx) - view.ox) / view.scale; // undo the mirroring and the cover scaling
         const vy = (cy + dy - view.oy) / view.scale;
-        if (isPerson(vx, vy)) hits++;
+        if (!screenTrace && isPerson(vx, vy)) hits++;
       }
       if (hits < 3) continue;
 
@@ -315,8 +328,12 @@ function drawBodyTrace(ctx, vw, vh, view, inUse) {
       if (!at) continue;
       const patch = zoomedIn(squareRect(vw, vh, at, boxSide(vw, vh, FEATURES[cell.fi].size)));
       drawFiltered(ctx, patch, c * T + 1, r * T + 1, T - 2, T - 2, fxIn);
+      drawn++;
     }
   }
+
+  // nothing to show yet (no face found): show the plain camera instead of a dead black screen
+  if (drawn === 0) drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
 }
 
 // How the camera fills the canvas without stretching ("cover": the longer side is cropped).
@@ -568,6 +585,9 @@ function applyCommand(c) {
     case 'setTileSize':
       if (isFinite(c.value)) tileSize = constrain(Number(c.value), MIN_TILE, MAX_TILE);
       break;
+    case 'toggleScreenTrace':
+      setScreenTrace(!screenTrace);
+      break;
     case 'toggleBodyTrace':
       setBodyTrace(!bodyTrace);
       break;
@@ -668,6 +688,7 @@ function publishState() {
       zoom,
       fullView,
       bodyTrace,
+      screenTrace,
       bodyLoading: bodyTrace && !bodySegReady,
       tileSize,
       showLabels,
