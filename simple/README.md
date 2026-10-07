@@ -50,7 +50,8 @@ fills your outline. The feature buttons choose what the tiles show: with only Ri
 with Right Eye and Nose on, the tiles are a random mix of the two; with none on, all six features are mixed.
 The first time you press it the body model has to download, so the button says "loading model..." for a few seconds
 and the laptop shows the normal camera until the outline is ready. The zoom slider and the inside filters apply to the
-tiles too.
+tiles too. When you are small in the frame, the body model is automatically zoomed in on you (it finds you from your
+face), so the outline stays accurate from further away.
 
 **Screen Trace** (next to Body Trace) uses the same mosaic but fills the whole screen instead of only your outline.
 It needs no body model, so it starts instantly. Only one of the two can be on at a time, and the Tile Size slider

@@ -57,6 +57,8 @@ const MAX_ZOOM = 5;
 const RANDOM_MAX_ZOOM = 2.5; // Randomize only picks zooms up to this
 const MAX_PEOPLE = 4;        // how many faces are tracked at once
 const GRACE_MS = 800;        // a person who drops out of detection for this long counts as gone
+const NEWCOMER_MS = 400;     // a newcomer who vanishes this fast was probably a false detection
+const CONFIRM_HITS = 5;      // a new face must show up in this many detections before it counts as a person
 const SMOOTHING = 0.35;      // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
 const MODES = ['none', 'mono', 'duo'];
 
@@ -73,7 +75,9 @@ let fxOut = 'none';            // ...and for everything outside them
 
 // ---- people ----
 const smooth = {}; // smoothed position per person+feature, keyed 'personId:featureIndex'
-const tracks = []; // everyone currently in frame: { id, x, y, face, lastSeen }
+const candidates = []; // every face seen lately, including brand-new ones not yet trusted: { id, x, y, face, lastSeen, seen }
+const tracks = []; // the people we trust (seen in several detections in a row): the ones everything else uses
+let lastFaces = null;  // the detection result we last processed, so each result is only counted once
 let nextPersonId = 1;
 let peopleKey = ''; // which people are in frame; when it changes the features get shuffled between them
 const perms = {};   // featureIndex -> { personId: id of the person whose feature is shown on them }
@@ -97,12 +101,14 @@ let lastPreviewAt = 0;
 const MIN_TILE = 14;     // smallest / largest mosaic tile, in "800 pixel screen" units like the box sizes
 const MAX_TILE = 120;
 let tileSize = 28;       // current mosaic tile size (the controller's Tile Size slider)
-const SEG_WIDTH = 256;   // the body model looks at a small copy of the picture (fast), this wide
+const SEG_SIZE = 320;    // the body model looks at a copy of the picture this many pixels wide (a zoomed-in crop when you are small in frame)
 let bodySeg = null;      // ml5 body segmentation model, only loaded the first time Body Trace is switched on
 let bodySegReady = false;
 let bodySegRunning = false;
 let segCanvas = null;    // the small picture the body model looks at
 let latestMask = null;   // newest silhouette: ImageData in the camera's own (unmirrored) orientation
+let maskRect = null;     // which part of the camera picture that silhouette covers: { sx, sy, sw, sh }
+let segRect = null;      // the part of the camera picture currently being fed to the body model (eased, so it doesn't jump)
 let maskPersonOpaque = true; // which way round the mask is: is the person the opaque part? (worked out live)
 let mosaicCells = [];    // one remembered random choice per tile: { fi: feature index, pid: person id }
 let mosaicKey = '';
@@ -253,19 +259,49 @@ function setScreenTrace(on) {
 
 // Give the body model a small copy of the camera picture, start it if needed, and keep the silhouette fresh.
 function feedBodyModel(vw, vh) {
-  const h = Math.round((SEG_WIDTH * vh) / vw);
+  // When you are small in the frame, give the model a square crop around the people (their faces tell us where)
+  // instead of the whole picture, so you fill more of what the model sees.
+  const target = bodyCropRect(vw, vh);
+  const eased = (a, b) => a + (b - a) * 0.2;
+  if (!segRect || (segRect.sw === vw) !== (target.sw === vw)) segRect = { ...target }; // jump when switching crop <-> whole
+  else segRect = { sx: eased(segRect.sx, target.sx), sy: eased(segRect.sy, target.sy), sw: eased(segRect.sw, target.sw), sh: eased(segRect.sh, target.sh) };
+
+  const w = SEG_SIZE;
+  const h = Math.round((SEG_SIZE * segRect.sh) / segRect.sw);
   if (!segCanvas) segCanvas = document.createElement('canvas');
-  if (segCanvas.width !== SEG_WIDTH || segCanvas.height !== h) {
-    segCanvas.width = SEG_WIDTH;
+  if (segCanvas.width !== w || segCanvas.height !== h) {
+    segCanvas.width = w;
     segCanvas.height = h;
   }
-  segCanvas.getContext('2d').drawImage(video.elt, 0, 0, SEG_WIDTH, h);
+  segCanvas.getContext('2d').drawImage(video.elt, segRect.sx, segRect.sy, segRect.sw, segRect.sh, 0, 0, w, h);
   if (bodySegReady && !bodySegRunning) {
     bodySegRunning = true;
     bodySeg.detectStart(segCanvas, (result) => {
-      if (result && result.maskImageData) latestMask = result.maskImageData;
+      if (result && result.maskImageData) {
+        latestMask = result.maskImageData;
+        maskRect = { ...segRect }; // the part of the picture this silhouette covers
+      }
     });
   }
+}
+
+// The part of the camera picture to give the body model: a square around everyone's body (estimated from their
+// faces: a body is roughly 9 face-heights tall and 7 face-widths wide), or the whole picture if they fill it anyway.
+function bodyCropRect(vw, vh) {
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+  if (tracks.length === 0) return whole;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  for (const t of tracks) {
+    const b = faceBox(t.face);
+    x0 = Math.min(x0, b.x + b.w / 2 - 3.5 * b.w);
+    x1 = Math.max(x1, b.x + b.w / 2 + 3.5 * b.w);
+    y0 = Math.min(y0, b.y - b.h);
+    y1 = Math.max(y1, b.y + 8 * b.h);
+  }
+  x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(vw, x1); y1 = Math.min(vh, y1);
+  const side = Math.max(x1 - x0, y1 - y0);
+  if (side >= 0.98 * Math.min(vw, vh)) return whole; // the people fill the picture anyway
+  return { sx: constrain((x0 + x1) / 2 - side / 2, 0, vw - side), sy: constrain((y0 + y1) / 2 - side / 2, 0, vh - side), sw: side, sh: side };
 }
 
 function drawMosaic(ctx, vw, vh, view, inUse) {
@@ -284,13 +320,16 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
     // nose. Whatever the mask says at the nose is "person".
     const mw = latestMask.width;
     const mh = latestMask.height;
+    const m = maskRect;
+    // the silhouette only covers part of the picture when we zoomed in on you: everything outside it is not body
+    const inside = (vx, vy) => vx >= m.sx && vx < m.sx + m.sw && vy >= m.sy && vy < m.sy + m.sh;
     const alphaAt = (vx, vy) => {
-      const x = constrain(Math.floor((vx / vw) * mw), 0, mw - 1);
-      const y = constrain(Math.floor((vy / vh) * mh), 0, mh - 1);
+      const x = constrain(Math.floor(((vx - m.sx) / m.sw) * mw), 0, mw - 1);
+      const y = constrain(Math.floor(((vy - m.sy) / m.sh) * mh), 0, mh - 1);
       return latestMask.data[(y * mw + x) * 4 + 3];
     };
-    if (tracks.length > 0) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
-    isPerson = (vx, vy) => alphaAt(vx, vy) > 127 === maskPersonOpaque;
+    if (tracks.length > 0 && inside(tracks[0].x, tracks[0].y)) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
+    isPerson = (vx, vy) => inside(vx, vy) && alphaAt(vx, vy) > 127 === maskPersonOpaque;
   }
 
   const T = Math.max(8, Math.round((tileSize * Math.min(width, height)) / 800));
@@ -478,34 +517,47 @@ function clearSmooth(idx) {
 function updatePeople() {
   const vw = video.elt.videoWidth || video.width;
   const maxMove = vw * 0.25; // a face further than this from every known person is someone new
-  const used = new Set();
-  for (const face of faces) {
-    const nose = face.keypoints && face.keypoints[1];
-    if (!nose) continue;
-    let best = null;
-    let bestDist = maxMove;
-    for (const t of tracks) {
-      if (used.has(t)) continue;
-      const d = dist(nose.x, nose.y, t.x, t.y);
-      if (d < bestDist) {
-        bestDist = d;
-        best = t;
+
+  // only look at each new detection result once (draw() runs more often than the detector does)
+  if (faces !== lastFaces) {
+    lastFaces = faces;
+    const used = new Set();
+    for (const face of dedupeFaces(faces)) {
+      const nose = face.keypoints && face.keypoints[1];
+      if (!nose) continue;
+      let best = null;
+      let bestDist = maxMove;
+      for (const t of candidates) {
+        if (used.has(t)) continue;
+        const d = dist(nose.x, nose.y, t.x, t.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = t;
+        }
       }
+      if (!best) {
+        best = { id: nextPersonId++, seen: 0 };
+        candidates.push(best);
+      }
+      Object.assign(best, { x: nose.x, y: nose.y, face, lastSeen: millis() });
+      best.seen++;
+      used.add(best);
     }
-    if (!best) {
-      best = { id: nextPersonId++ };
-      tracks.push(best);
-    }
-    Object.assign(best, { x: nose.x, y: nose.y, face, lastSeen: millis() });
-    used.add(best);
   }
 
-  for (let i = tracks.length - 1; i >= 0; i--) {
-    if (millis() - tracks[i].lastSeen > GRACE_MS) {
-      for (const k in smooth) if (k.startsWith(`${tracks[i].id}:`)) delete smooth[k];
-      tracks.splice(i, 1);
+  // forget faces that went away (newcomers that never settled go quickly: likely a false detection)
+  for (let i = candidates.length - 1; i >= 0; i--) {
+    const t = candidates[i];
+    const limit = t.seen >= CONFIRM_HITS ? GRACE_MS : NEWCOMER_MS;
+    if (millis() - t.lastSeen > limit) {
+      for (const k in smooth) if (k.startsWith(`${t.id}:`)) delete smooth[k];
+      candidates.splice(i, 1);
     }
   }
+
+  // people = the faces we trust
+  tracks.length = 0;
+  for (const t of candidates) if (t.seen >= CONFIRM_HITS) tracks.push(t);
   tracks.sort((a, b) => a.id - b.id);
 
   const key = tracks.map((t) => t.id).join(',');
@@ -514,6 +566,41 @@ function updatePeople() {
     shuffleFeatures();
     publishStatus();
   }
+}
+
+// The face detector sometimes reports one person twice (two overlapping faces). Keep only the bigger of any pair
+// whose boxes overlap a lot.
+function dedupeFaces(list) {
+  const boxes = list.map(faceBox);
+  const keep = [];
+  const order = list.map((_, i) => i).sort((a, b) => boxes[b].w * boxes[b].h - boxes[a].w * boxes[a].h); // biggest first
+  for (const i of order) {
+    const a = boxes[i];
+    const dup = keep.some((j) => {
+      const b = boxes[j];
+      const ix = Math.max(0, Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x));
+      const iy = Math.max(0, Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y));
+      const smaller = Math.min(a.w * a.h, b.w * b.h);
+      return smaller > 0 && (ix * iy) / smaller > 0.4;
+    });
+    if (!dup) keep.push(i);
+  }
+  return keep.map((i) => list[i]);
+}
+
+// the rectangle around a detected face, in camera pixels: { x, y, w, h } (worked out once and remembered)
+function faceBox(face) {
+  if (face._box) return face._box;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  if (face.box && isFinite(face.box.xMin)) {
+    ({ xMin: x0, yMin: y0, xMax: x1, yMax: y1 } = face.box);
+  } else {
+    for (const k of face.keypoints || []) {
+      x0 = Math.min(x0, k.x); y0 = Math.min(y0, k.y); x1 = Math.max(x1, k.x); y1 = Math.max(y1, k.y);
+    }
+  }
+  face._box = { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+  return face._box;
 }
 
 // For every feature, hand each person someone else's version of it (a random rotation, so nobody keeps their own).
@@ -629,6 +716,8 @@ function startCamera(deviceId) {
   }
   faces = [];
   tracks.length = 0; // everyone is re-detected from the new camera
+  candidates.length = 0;
+  lastFaces = null;
   peopleKey = '';
   clearSmooth();
   const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
