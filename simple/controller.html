@@ -2,26 +2,38 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
     <title>Face Projection (Controller)</title>
     <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
     <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
     <style>
-      html, body { margin: 0; background: #111; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
-      main { max-width: 560px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 14px; }
-      .info { color: #00ff00; font-family: monospace; font-size: 13px; text-align: center; }
-      .info.bad { color: #ff5555; }
-      .btn, select {
-        width: 100%; box-sizing: border-box; padding: 16px 10px; border: none; border-radius: 8px;
-        background: #00ff00; color: #000; font-family: monospace; font-size: 16px; cursor: pointer;
+      html, body { margin: 0; height: 100%; overflow: hidden; background: #111; touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+      /* everything is sized to the screen: one grid that is exactly as tall as the window, nothing scrolls */
+      main {
+        height: 100vh; height: 100dvh; box-sizing: border-box; padding: 10px; gap: 8px;
+        display: grid; grid-template-rows: auto minmax(0, 1fr);
+        font-size: clamp(11px, 2.1vmin, 20px);
       }
-      select { padding: 14px 10px; }
-      .cols { display: flex; gap: 10px; align-items: flex-start; }
-      .col { flex: 1; display: flex; flex-direction: column; gap: 10px; }
-      .heading { color: #00ff00; font-family: monospace; font-size: 12px; text-align: center; margin-top: 4px; }
-      .slider-box { color: #00ff00; font-family: monospace; font-size: 13px; display: flex; flex-direction: column; gap: 8px; }
-      .slider-box input { width: 100%; height: 36px; }
-      .ends { display: flex; justify-content: space-between; font-size: 12px; }
+      .info { color: #00ff00; font-family: monospace; font-size: 0.8em; text-align: center; }
+      .info.bad { color: #ff5555; }
+      .layout { display: grid; grid-template-columns: 1fr 1.8fr 1fr; gap: 10px; min-height: 0; }
+      .subcols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-height: 0; }
+      .col { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
+      .btn, select {
+        box-sizing: border-box; width: 100%; padding: 0 6px; border: none; border-radius: 8px;
+        background: #00ff00; color: #000; font-family: monospace; font-size: 1em; line-height: 1.15; cursor: pointer;
+      }
+      .btn { flex: 1 1 0; min-height: 0; }  /* buttons share the column's height equally */
+      select { flex: none; padding: 0.7em 6px; }
+      .heading { flex: none; color: #00ff00; font-family: monospace; font-size: 0.8em; text-align: center; }
+      .preview { flex: none; width: 100%; height: auto; max-height: 38vh; object-fit: contain; background: #000; border: 2px solid #00ff00; box-sizing: border-box; }
+      .slider-box {
+        flex: 1 1 0; min-height: 0; display: flex; flex-direction: column; justify-content: center; gap: 10px;
+        border: 2px solid #00ff00; border-radius: 8px; padding: 10px; box-sizing: border-box;
+        color: #00ff00; font-family: monospace; font-size: 0.9em; text-align: center;
+      }
+      .slider-box input { width: 100%; height: 3em; margin: 0; accent-color: #00ff00; }
+      .ends { display: flex; justify-content: space-between; font-size: 0.8em; }
     </style>
   </head>
   <body>
@@ -63,28 +75,21 @@ function setup() {
   const root = select('main');
 
   infoLine = createDiv('Connecting...').class('info').parent(root);
+  const layout = createDiv().class('layout').parent(root);
 
-  // the small full-camera view (drawn on the laptop, sent over as pictures)
-  previewImg = createImg('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'camera preview').parent(root);
-  previewImg.style('width', '100%');
-  previewImg.style('max-width', '420px');
-  previewImg.style('height', 'auto'); // follows the shape of the camera picture
-  previewImg.style('background', '#000');
-  previewImg.style('align-self', 'center');
-  previewImg.style('border', '2px solid #00ff00');
-  previewImg.style('box-sizing', 'border-box');
-
-  camSelect = createSelect().parent(root);
+  // column 1: camera preview, camera choice, shuffle, randomize
+  const left = createDiv().class('col').parent(layout);
+  previewImg = createImg('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'camera preview').class('preview').parent(left);
+  camSelect = createSelect().parent(left);
   camSelect.changed(() => send({ name: 'setCamera', id: camSelect.value() }));
-
-  tap(createButton('Randomize').class('btn').parent(root), () => send({ name: 'randomize' }));
-  shuffleBtn = createButton('Shuffle Features').class('btn').parent(root);
+  shuffleBtn = createButton('Shuffle Features').class('btn').parent(left);
   tap(shuffleBtn, () => send({ name: 'shuffle' }));
+  tap(createButton('Randomize').class('btn').parent(left), () => send({ name: 'randomize' }));
 
-  const cols = createDiv().class('cols').parent(root);
+  // column 2 is two columns: the features, then labels and the colour filters
+  const mid = createDiv().class('subcols').parent(layout);
 
-  // first column: one button per feature, then Full View
-  const featCol = createDiv().class('col').parent(cols);
+  const featCol = createDiv().class('col').parent(mid);
   FEATURE_LABELS.forEach((label, idx) => {
     const b = createButton(label).class('btn').parent(featCol);
     tap(b, () => send({ name: 'toggleFeature', idx }));
@@ -93,8 +98,7 @@ function setup() {
   fullBtn = createButton('Full View').class('btn').parent(featCol);
   tap(fullBtn, () => send({ name: 'toggleFull' }));
 
-  // second column: labels, then the inside / outside filters
-  const fxCol = createDiv().class('col').parent(cols);
+  const fxCol = createDiv().class('col').parent(mid);
   labelsBtn = createButton('Labels').class('btn').parent(fxCol);
   tap(labelsBtn, () => send({ name: 'toggleLabels' }));
   [['in', 'INSIDE BOX', 'setFxIn'], ['out', 'OUTSIDE BOX', 'setFxOut']].forEach(([target, heading, cmd]) => {
@@ -111,8 +115,11 @@ function setup() {
     });
   });
 
-  // box size slider (flipped: higher value = smaller box = more zoomed in)
-  const sizeBox = createDiv().class('slider-box').parent(root);
+  // column 3: the sliders
+  const right = createDiv().class('col').parent(layout);
+
+  // box size (flipped: higher value = smaller box = more zoomed in)
+  const sizeBox = createDiv().class('slider-box').parent(right);
   sizeLabel = createDiv('BOX SIZE').parent(sizeBox);
   sizeSlider = createSlider(MIN_SIZE, MAX_SIZE, MIN_SIZE + MAX_SIZE - 100, 1).parent(sizeBox);
   const ends = createDiv().class('ends').parent(sizeBox);
@@ -123,10 +130,13 @@ function setup() {
   });
   holdWhileDragging(sizeSlider, 'size');
 
-  // zoom slider
-  const zoomBox = createDiv().class('slider-box').parent(root);
+  // zoom
+  const zoomBox = createDiv().class('slider-box').parent(right);
   zoomLabel = createDiv('ZOOM INSIDE BOX').parent(zoomBox);
   zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, MIN_ZOOM, 0.1).parent(zoomBox);
+  const zends = createDiv().class('ends').parent(zoomBox);
+  createSpan('1x').parent(zends);
+  createSpan('5x').parent(zends);
   zoomSlider.input(() => send({ name: 'setZoom', value: zoomSlider.value() }));
   holdWhileDragging(zoomSlider, 'zoom');
 
