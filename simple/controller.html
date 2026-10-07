@@ -38,8 +38,15 @@
       .slider-box input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 3em; height: 3em; margin-top: -1.1em; border-radius: 50%; background: #00ff00; border: 3px solid #000; box-shadow: 0 0 0 2px #00ff00; }
       .slider-box input[type=range]::-moz-range-track { height: 0.8em; background: #0b5f0b; border-radius: 1em; }
       .slider-box input[type=range]::-moz-range-thumb { width: 3em; height: 3em; box-sizing: border-box; border-radius: 50%; background: #00ff00; border: 3px solid #000; box-shadow: 0 0 0 2px #00ff00; }
-      .btnrow { flex: 0 0 auto; display: flex; gap: 8px; }
-      .btnrow .btn.fixed { flex: 1 1 0; min-width: 0; }
+      .btnrow { flex: 0 0 auto; display: flex; flex-direction: column; gap: 8px; }  /* Body Trace, with Screen Trace under it */
+      .btnrow .btn.fixed { flex: 0 0 auto; padding: 0.9em 6px; }
+      /* on very short screens (e.g. a phone on its side) the knobs shrink a little so the three cards still fit */
+      @media (max-height: 480px) {
+        .slider-box { gap: 2px; padding: 6px; }
+        .slider-box input[type=range] { height: 2.6em; }
+        .slider-box input[type=range]::-webkit-slider-thumb { width: 2.2em; height: 2.2em; margin-top: -0.7em; }
+        .slider-box input[type=range]::-moz-range-thumb { width: 2.2em; height: 2.2em; }
+      }
       .btn.fixed { flex: 0 0 auto; padding: 1.1em 6px; }
       .ends { display: flex; justify-content: space-between; font-size: 0.8em; }
     </style>
