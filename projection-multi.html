@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Face Projection (Multiple People)</title>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.9.4/lib/p5.min.js"></script>
+    <script src="https://unpkg.com/ml5@1/dist/ml5.min.js"></script>
+    <style>
+      html, body { margin: 0; background: #111; }
+      main { display: flex; flex-direction: row; align-items: flex-start; justify-content: center; gap: 20px; padding: 20px; }
+    </style>
+  </head>
+  <body>
+    <main></main>
+    <div id="status" style="position:fixed;top:0;left:0;right:0;padding:6px 10px;background:#333;color:#fff;font:13px sans-serif;z-index:9">Loading libraries...</div>
+    <script>
+      // show problems on the page itself, since the console may not be visible
+      const statusEl = document.getElementById('status');
+      window.addEventListener('error', (e) => {
+        statusEl.style.background = '#a00';
+        statusEl.textContent = 'Error: ' + e.message + (e.target && e.target.src ? ' (' + e.target.src + ')' : '');
+      }, true);
+      window.addEventListener('load', () => {
+        if (typeof p5 === 'undefined' || typeof ml5 === 'undefined') {
+          statusEl.style.background = '#a00';
+          statusEl.textContent = 'Could not load ' + (typeof p5 === 'undefined' ? 'p5' : 'ml5') + ' from the CDN (check internet / blocked scripts).';
+        } else {
+          statusEl.textContent = 'Libraries loaded. Allow camera access when asked...';
+        }
+      });
+    </script>
+    <script>
+let video;
+let camSelect; // dropdown of the connected cameras (built-in and external)
+let faceMesh;
+let faces = [];
+
+// Each feature is a fixed-size square region of the video that gets blown up to fill the canvas.
+// "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
+// Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
+const FEATURES = [
+  { label: 'Left Eye',      size: 100, center: (f) => f.leftEye },
+  { label: 'Right Eye',     size: 100, center: (f) => f.rightEye },
+  { label: 'Left Eyebrow',  size: 110, center: (f) => f.leftEyebrow },
+  { label: 'Right Eyebrow', size: 110, center: (f) => f.rightEyebrow },
+  { label: 'Nose',          size: 90,  center: (f) => f.keypoints[1] },
+  { label: 'Mouth',         size: 130, center: (f) => f.lips },
+];
+
+const MIN_SIZE = 20;
+const MAX_SIZE = 300;
+const MAX_PEOPLE = 4;     // how many faces are tracked at once
+const GRACE_MS = 800;     // a person who drops out of detection for this long counts as gone
+const SMOOTHING = 0.35; // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
+
+let current = 0; // the feature whose size the slider edits (last one switched on)
+let slider, side;
+let zoom = 1; // magnification of the footage inside the box (1 = none)
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 5;
+const RANDOM_MAX_ZOOM = 2.5; // Randomize only picks zooms up to this
+let zoomLabel, zoomSlider;
+let fullView = false; // true = main canvas shows the whole camera view instead of the zoomed feature
+let fullBtn, labelsBtn;
+let showLabels = false; // write each highlighted feature's name in the center of its box
+// 'none' | 'mono' | 'duo': one filter for the footage inside the box, one for everything outside it
+let fxIn = 'none';
+let fxOut = 'none';
+const fxBtns = { in: {}, out: {} };
+const buttons = [];
+
+const BTN_COLOR = '#00ff00';
+const MONO = 'monospace';
+const PREVIEW = 300; // size of the small full-camera preview to the right of the canvas
+let preview;
+
+// features can be highlighted together (or none at all); each has its own smoothed position
+const selected = new Set([0]);
+const smooth = {}; // smoothed position per person+feature, keyed 'personId:featureIndex'
+const tracks = []; // everyone currently in frame: { id, x, y, face, lastSeen }
+let nextPersonId = 1;
+let peopleKey = ''; // which people are in frame; when it changes the features get shuffled between them
+const perms = {};   // featureIndex -> { personId: id of the person whose feature is shown on them }
+let shuffleBtn;
+let sizeLabel;
+
+function preload() {
+  faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE });
+}
+
+function setup() {
+  const cnv = createCanvas(800, 800);
+  cnv.parent(select('main'));
+  side = createDiv();
+  side.parent(select('main'));
+  side.style('display', 'flex');
+  side.style('flex-direction', 'column');
+  side.style('gap', '16px');
+  side.style('width', PREVIEW + 'px');
+  // camera picker at the top of the side panel, so an external webcam can be chosen
+  camSelect = createSelect();
+  camSelect.parent(side);
+  camSelect.style('width', '100%');
+  camSelect.style('padding', '10px');
+  camSelect.style('border', 'none');
+  camSelect.style('border-radius', '6px');
+  camSelect.style('background-color', BTN_COLOR);
+  camSelect.style('color', 'black');
+  camSelect.style('font-family', MONO);
+  camSelect.style('font-size', '14px');
+  camSelect.style('cursor', 'pointer');
+  camSelect.changed(() => startCamera(camSelect.value()));
+  navigator.mediaDevices.addEventListener('devicechange', listCameras); // e.g. plugging in a webcam
+  preview = createGraphics(PREVIEW, PREVIEW);
+  preview.parent(side);
+  preview.show();
+  startCamera(null); // null = the browser's default camera; pick another from the dropdown
+  const st = document.getElementById('status');
+  if (st) st.remove();
+  buildGui();
+}
+
+function buildGui() {
+  // single column of feature buttons, under the preview on the right
+  // randomize: one random feature, a random zoom and a random inside filter (normal / mono / duo)
+  const randomBtn = createButton('Randomize');
+  randomBtn.parent(side);
+  randomBtn.style('width', '100%');
+  randomBtn.style('padding', '10px');
+  randomBtn.style('border', 'none');
+  randomBtn.style('border-radius', '6px');
+  randomBtn.style('background-color', BTN_COLOR);
+  randomBtn.style('color', 'black');
+  randomBtn.style('font-family', MONO);
+  randomBtn.style('font-size', '14px');
+  randomBtn.style('cursor', 'pointer');
+  randomBtn.mousePressed(randomize);
+
+  // shuffle: swap features between the people in frame (also happens automatically when someone arrives or leaves)
+  shuffleBtn = createButton('Shuffle Features');
+  shuffleBtn.parent(side);
+  shuffleBtn.style('width', '100%');
+  shuffleBtn.style('padding', '10px');
+  shuffleBtn.style('border', 'none');
+  shuffleBtn.style('border-radius', '6px');
+  shuffleBtn.style('background-color', BTN_COLOR);
+  shuffleBtn.style('color', 'black');
+  shuffleBtn.style('font-family', MONO);
+  shuffleBtn.style('font-size', '14px');
+  shuffleBtn.style('cursor', 'pointer');
+  shuffleBtn.mousePressed(shuffleFeatures);
+
+  const row = createDiv();
+  row.parent(side);
+  row.style('display', 'flex');
+  row.style('gap', '8px');
+  row.style('align-items', 'flex-start');
+
+  const col = createDiv();
+  col.parent(row);
+  col.style('display', 'flex');
+  col.style('flex-direction', 'column');
+  col.style('gap', '8px');
+  col.style('flex', '1');
+
+  // effect buttons in a second column on the right
+  const fxCol = createDiv();
+  fxCol.parent(row);
+  fxCol.style('display', 'flex');
+  fxCol.style('flex-direction', 'column');
+  fxCol.style('gap', '8px');
+  fxCol.style('flex', '1');
+  [['in', 'Inside box'], ['out', 'Outside box']].forEach(([target, heading]) => {
+    const h = createDiv(heading.toUpperCase());
+    h.parent(fxCol);
+    h.style('color', BTN_COLOR);
+    h.style('font-family', MONO);
+    h.style('font-size', '11px');
+    h.style('text-align', 'center');
+    [['mono', 'Monochrome'], ['duo', 'Duotone']].forEach(([mode, label]) => {
+      const b = createButton(label);
+      b.parent(fxCol);
+      b.style('padding', '10px');
+      b.style('border', 'none');
+      b.style('border-radius', '6px');
+      b.style('background-color', BTN_COLOR);
+      b.style('color', 'black');
+      b.style('font-family', MONO);
+      b.style('font-size', '14px');
+      b.style('cursor', 'pointer');
+      b.mousePressed(() => {
+        // press again to turn it off
+        if (target === 'in') fxIn = fxIn === mode ? 'none' : mode;
+        else fxOut = fxOut === mode ? 'none' : mode;
+        updateGui();
+      });
+      fxBtns[target][mode] = b;
+    });
+  });
+
+  FEATURES.forEach((f, idx) => {
+    const btn = createButton(f.label);
+    btn.parent(col);
+    btn.style('padding', '10px');
+    btn.style('border', 'none');
+    btn.style('border-radius', '6px');
+    btn.style('background-color', BTN_COLOR);
+    btn.style('color', 'black');
+    btn.style('font-family', MONO);
+    btn.style('font-size', '14px');
+    btn.style('cursor', 'pointer');
+    btn.mousePressed(() => toggle_feature(idx));
+    buttons[idx] = btn;
+  });
+
+  // full view: project the whole camera view (what the small preview shows) onto the main canvas
+  fullBtn = createButton('Full View');
+  fullBtn.parent(col);
+  fullBtn.style('padding', '10px');
+  fullBtn.style('border', 'none');
+  fullBtn.style('border-radius', '6px');
+  fullBtn.style('background-color', BTN_COLOR);
+  fullBtn.style('color', 'black');
+  fullBtn.style('font-family', MONO);
+  fullBtn.style('font-size', '14px');
+  fullBtn.style('cursor', 'pointer');
+  fullBtn.mousePressed(() => {
+    fullView = !fullView; // independent toggle: features can still be switched while it's on
+    updateGui();
+  });
+
+  // labels: write the feature name in the center of each box
+  labelsBtn = createButton('Labels');
+  labelsBtn.parent(fxCol);
+  fxCol.elt.insertBefore(labelsBtn.elt, fxCol.elt.firstChild); // top of the second column
+  labelsBtn.style('padding', '10px');
+  labelsBtn.style('border', 'none');
+  labelsBtn.style('border-radius', '6px');
+  labelsBtn.style('background-color', BTN_COLOR);
+  labelsBtn.style('color', 'black');
+  labelsBtn.style('font-family', MONO);
+  labelsBtn.style('font-size', '14px');
+  labelsBtn.style('cursor', 'pointer');
+  labelsBtn.mousePressed(() => {
+    showLabels = !showLabels;
+    updateGui();
+  });
+
+  // size slider (flipped): higher value = smaller box = more zoomed in
+  const sliderBox = createDiv();
+  sliderBox.parent(side);
+  sliderBox.style('display', 'flex');
+  sliderBox.style('flex-direction', 'column');
+  sliderBox.style('gap', '4px');
+  sliderBox.style('color', BTN_COLOR);
+  sliderBox.style('font-family', MONO);
+  sliderBox.style('font-size', '12px');
+  sizeLabel = createDiv();
+  sizeLabel.parent(sliderBox);
+  slider = createSlider(MIN_SIZE, MAX_SIZE, sizeToSlider(FEATURES[0].size), 1);
+  slider.parent(sliderBox);
+  slider.style('width', '100%');
+  slider.input(() => (FEATURES[current].size = sliderToSize(slider.value())));
+  const ends = createDiv();
+  ends.parent(sliderBox);
+  ends.style('display', 'flex');
+  ends.style('justify-content', 'space-between');
+  createSpan('LARGE').parent(ends);
+  createSpan('SMALL').parent(ends);
+
+  // zoom slider: magnifies the footage inside the box (the box itself keeps its size)
+  const zoomBox = createDiv();
+  zoomBox.parent(side);
+  zoomBox.style('display', 'flex');
+  zoomBox.style('flex-direction', 'column');
+  zoomBox.style('gap', '4px');
+  zoomBox.style('color', BTN_COLOR);
+  zoomBox.style('font-family', MONO);
+  zoomBox.style('font-size', '12px');
+  zoomLabel = createDiv();
+  zoomLabel.parent(zoomBox);
+  zoomSlider = createSlider(MIN_ZOOM, MAX_ZOOM, zoom, 0.1);
+  zoomSlider.parent(zoomBox);
+  zoomSlider.style('width', '100%');
+  zoomSlider.input(() => {
+    zoom = zoomSlider.value();
+    showZoom();
+  });
+  showZoom();
+
+  updateGui();
+}
+
+// the slider is flipped: box size = MIN + MAX - slider value
+function sliderToSize(v) {
+  return MIN_SIZE + MAX_SIZE - v;
+}
+const sizeToSlider = sliderToSize; // the flip is its own inverse
+
+function showZoom() {
+  zoomLabel.html(`ZOOM INSIDE BOX: ${zoom.toFixed(1)}x`);
+}
+
+function randomize() {
+  const next = floor(random(FEATURES.length));
+  selected.clear();
+  clearSmooth();
+  selected.add(next);
+  current = next;
+  zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
+  zoomSlider.value(zoom);
+  showZoom();
+  fxIn = random(['none', 'mono', 'duo']);
+  showLabels = random() < 0.5;
+  shuffleFeatures();
+  updateGui();
+}
+
+// click a feature to switch it on or off; any number (including none) can be on at once
+function toggle_feature(idx) {
+  if (selected.has(idx)) {
+    selected.delete(idx);
+    if (current === idx && selected.size > 0) current = [...selected].pop();
+  } else {
+    selected.add(idx);
+    clearSmooth(idx); // jump straight to the face instead of gliding in from an old position
+    current = idx;
+  }
+  updateGui();
+}
+
+// arrow keys / space: jump to a single feature
+function cycle(dir) {
+  const next = (current + dir + FEATURES.length) % FEATURES.length;
+  selected.clear();
+  clearSmooth();
+  selected.add(next);
+  current = next;
+  updateGui();
+}
+
+function updateGui() {
+  // highlighted features are full green, the others are dimmed
+  buttons.forEach((btn, i) => btn.style('opacity', selected.has(i) ? '1' : '0.35'));
+  fullBtn.style('opacity', fullView ? '1' : '0.35');
+  labelsBtn.style('opacity', showLabels ? '1' : '0.35');
+  for (const m in fxBtns.in) fxBtns.in[m].style('opacity', fxIn === m ? '1' : '0.35');
+  for (const m in fxBtns.out) fxBtns.out[m].style('opacity', fxOut === m ? '1' : '0.35');
+  sizeLabel.html(`BOX SIZE: ${FEATURES[current].label.toUpperCase()}`);
+  slider.value(sizeToSlider(FEATURES[current].size));
+}
+
+function keyPressed() {
+  if (keyCode === RIGHT_ARROW || key === ' ') cycle(1);
+  if (keyCode === LEFT_ARROW) cycle(-1);
+}
+
+function draw() {
+  background(0);
+
+  const vw = video.elt.videoWidth || video.width;
+  const vh = video.elt.videoHeight || video.height;
+  updatePeople();
+
+  // follow every highlighted feature on every person in frame
+  selected.forEach((idx) => {
+    const f = FEATURES[idx];
+    for (const t of tracks) {
+      const p = f.center(t.face);
+      if (!p) continue;
+      const px = p.centerX !== undefined ? p.centerX : p.x;
+      const py = p.centerY !== undefined ? p.centerY : p.y;
+      const key = `${t.id}:${idx}`;
+      const prev = smooth[key];
+      smooth[key] = prev ? { x: lerp(prev.x, px, SMOOTHING), y: lerp(prev.y, py, SMOOTHING) } : { x: px, y: py };
+    }
+  });
+
+  // one box per person per highlighted feature. The box sits on that person's feature, but what it shows
+  // comes from whoever the shuffle assigned (`src`), so features appear to swap between people.
+  const boxes = [];
+  selected.forEach((idx) => {
+    const f = FEATURES[idx];
+    for (const t of tracks) {
+      const at = smooth[`${t.id}:${idx}`];
+      if (!at) continue;
+      const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
+      const from = smooth[`${fromId}:${idx}`] || at;
+      boxes.push({ ...makeBox(vw, vh, f.size, at), src: makeBox(vw, vh, f.size, from), label: f.label });
+    }
+  });
+
+  const ctx = drawingContext;
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+
+  // whole camera view: when Full View is on, or when no feature is highlighted (no box)
+  if (fullView || selected.size === 0) {
+    drawFiltered(ctx, whole, 0, 0, width, height, fxOut);
+    for (const b of boxes) {
+      const bx = width - (b.sx + b.sw) * (width / vw);
+      const by = b.sy * (height / vh);
+      const bw = b.sw * (width / vw);
+      const bh = b.sh * (height / vh);
+      // redraw the box on top so the outside filter never touches it
+      drawFiltered(ctx, zoomedIn(b.src), bx, by, bw, bh, fxIn);
+      noFill();
+      stroke(BTN_COLOR);
+      strokeWeight(2);
+      rect(bx, by, bw, bh);
+      if (showLabels) drawLabel(ctx, b.label, bx + bw / 2, by + bh / 2, 20);
+    }
+    drawPreview(vw, vh, boxes);
+    return;
+  }
+
+  if (boxes.length === 0) {
+    // no face yet: show the plain mirrored camera so it's clear the sketch is alive
+    drawFiltered(ctx, whole, 0, 0, width, height, 'none');
+    fill(0, 160);
+    noStroke();
+    rect(0, height / 2 - 30, width, 60);
+    fill(255);
+    textSize(24);
+    textAlign(CENTER, CENTER);
+    text('Looking for a face...', width / 2, height / 2);
+    drawPreview(vw, vh, boxes);
+    return;
+  }
+
+  // project each highlighted box onto the canvas: one fills it, several tile it in a centered grid
+  const n = boxes.length;
+  const cols = Math.ceil(Math.sqrt(n));
+  const rows = Math.ceil(n / cols);
+  const cell = width / cols;
+  boxes.forEach((b, i) => {
+    const r = Math.floor(i / cols);
+    const c = i % cols;
+    const inRow = Math.min(cols, n - r * cols);
+    const ox = (width - inRow * cell) / 2 + c * cell;
+    const oy = (height - rows * cell) / 2 + r * cell;
+    drawFiltered(ctx, zoomedIn(b.src), ox, oy, cell, cell, fxIn);
+    if (showLabels) drawLabel(ctx, b.label, ox + cell / 2, oy + cell / 2, constrain(cell / 12, 14, 32));
+  });
+
+  drawPreview(vw, vh, boxes);
+}
+
+// the square for a feature centered on `pt`, in raw video pixels (canvas size -> video size), kept inside the frame
+function makeBox(vw, vh, size, pt) {
+  const sw = size * (vw / width);
+  const sh = size * (vh / height);
+  return {
+    sx: constrain(pt.x - sw / 2, 0, vw - sw),
+    sy: constrain(pt.y - sh / 2, 0, vh - sh),
+    sw,
+    sh,
+  };
+}
+
+// small mirrored preview of the full camera (beside the canvas) with the highlighted squares outlined
+function drawPreview(vw, vh, boxes) {
+  preview.background(0);
+  const pctx = preview.drawingContext;
+  drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, PREVIEW, fxOut);
+
+  const k = PREVIEW / vw;
+  const kh = PREVIEW / vh;
+  for (const box of boxes) {
+    // mirror x to match the flipped preview
+    const x = PREVIEW - (box.sx + box.sw) * k;
+    const y = box.sy * kh;
+    drawFiltered(pctx, zoomedIn(box.src), x, y, box.sw * k, box.sh * kh, fxIn);
+    preview.noFill();
+    preview.stroke(BTN_COLOR);
+    preview.strokeWeight(2);
+    preview.rect(x, y, box.sw * k, box.sh * kh);
+    if (showLabels) drawLabel(pctx, box.label, x + (box.sw * k) / 2, y + (box.sh * kh) / 2, 11);
+  }
+}
+
+// Draw a rect of the camera (raw pixel rect `box`) into the destination rect (dx, dy, dw, dh) of `ctx`,
+// mirrored like the rest of the view, with the given filter mode applied to just that region.
+// The filters use canvas blend modes (no per-pixel JavaScript), so they stay fast:
+//   mono: a black fill in "saturation" mode strips the color
+//   duo:  then a #00ff00 fill in "multiply" mode maps black -> black and white -> #00ff00
+function drawFiltered(ctx, box, dx, dy, dw, dh, mode) {
+  ctx.save();
+  ctx.translate(dx + dw, dy);
+  ctx.scale(-1, 1);
+  ctx.drawImage(video.elt, box.sx, box.sy, box.sw, box.sh, 0, 0, dw, dh);
+  if (mode !== 'none') {
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, dw, dh);
+    if (mode === 'duo') {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = BTN_COLOR;
+      ctx.fillRect(0, 0, dw, dh);
+    }
+  }
+  ctx.restore();
+}
+
+// The part of the box that is actually shown: a smaller rect around the same center (zoom 1 = the whole box).
+function zoomedIn(box) {
+  const sw = box.sw / zoom;
+  const sh = box.sh / zoom;
+  return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
+}
+
+// Feature name in plain white monospace, centered on (cx, cy).
+function drawLabel(ctx, text, cx, cy, size) {
+  ctx.save();
+  ctx.font = `${size}px monospace`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(text, cx, cy);
+  ctx.restore();
+}
+
+// (Re)start the webcam on a specific camera and point face tracking at it.
+// Every camera switch builds a fresh faceMesh model: re-pointing one running model at a new video
+// is unreliable (its loop can die on the old, stopped stream), which left tracking dead on the new camera.
+function startCamera(deviceId) {
+  const firstStart = !video;
+  if (video) {
+    faceMesh.detectStop();
+    video.remove(); // also stops the old camera stream
+  }
+  faces = [];
+  tracks.length = 0; // everyone is re-detected from the new camera
+  peopleKey = '';
+  clearSmooth();
+  const constraints = { video: { width: 800, height: 800 }, audio: false };
+  if (deviceId) constraints.video.deviceId = { exact: deviceId };
+  const vid = createCapture(constraints, listCameras);
+  video = vid;
+  vid.size(800, 800);
+  vid.hide();
+
+  const startTracking = () => {
+    if (vid !== video) return; // the user already switched to another camera
+    const model = faceMesh;
+    model.detectStart(vid, (results) => {
+      if (model === faceMesh) faces = results; // ignore results from an old model
+    });
+  };
+  if (firstStart) {
+    startTracking(); // the model loaded in preload()
+  } else {
+    faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE }, startTracking);
+  }
+}
+
+// Fill the dropdown with every connected camera. Names only appear once camera permission is granted,
+// which is why this runs after the first stream starts.
+async function listCameras() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  const stream = video && video.elt.srcObject;
+  const active = stream && stream.getVideoTracks()[0] ? stream.getVideoTracks()[0].getSettings().deviceId : null;
+  camSelect.elt.innerHTML = '';
+  devices.forEach((d, i) => camSelect.option(d.label || `Camera ${i + 1}`, d.deviceId));
+  if (active) camSelect.selected(active);
+}
+
+    
+// ---- several people ----
+
+function clearSmooth(idx) {
+  for (const k in smooth) if (idx === undefined || k.endsWith(`:${idx}`)) delete smooth[k];
+}
+
+// Match this frame's faces to the people seen before (nearest nose position), add newcomers, drop people who left.
+function updatePeople() {
+  const vw = video.elt.videoWidth || video.width;
+  const maxMove = vw * 0.25; // a face further than this from every known person is someone new
+  const used = new Set();
+  for (const face of faces) {
+    const nose = face.keypoints && face.keypoints[1];
+    if (!nose) continue;
+    let best = null;
+    let bestDist = maxMove;
+    for (const t of tracks) {
+      if (used.has(t)) continue;
+      const d = dist(nose.x, nose.y, t.x, t.y);
+      if (d < bestDist) {
+        bestDist = d;
+        best = t;
+      }
+    }
+    if (!best) {
+      best = { id: nextPersonId++ };
+      tracks.push(best);
+    }
+    Object.assign(best, { x: nose.x, y: nose.y, face, lastSeen: millis() });
+    used.add(best);
+  }
+
+  for (let i = tracks.length - 1; i >= 0; i--) {
+    if (millis() - tracks[i].lastSeen > GRACE_MS) {
+      for (const k in smooth) if (k.startsWith(`${tracks[i].id}:`)) delete smooth[k];
+      tracks.splice(i, 1);
+    }
+  }
+  tracks.sort((a, b) => a.id - b.id);
+
+  const key = tracks.map((t) => t.id).join(',');
+  if (key !== peopleKey) {
+    peopleKey = key; // someone arrived or left: switch the features around
+    shuffleFeatures();
+  }
+}
+
+// For every feature, hand each person someone else's version of it (a random rotation, so nobody keeps their own).
+function shuffleFeatures() {
+  const ids = tracks.map((t) => t.id);
+  FEATURES.forEach((_, idx) => {
+    const map = {};
+    const shift = ids.length > 1 ? floor(random(1, ids.length)) : 0;
+    ids.forEach((id, i) => (map[id] = ids[(i + shift) % ids.length]));
+    perms[idx] = map;
+  });
+  if (shuffleBtn) shuffleBtn.html(`Shuffle Features (${ids.length} ${ids.length === 1 ? 'person' : 'people'})`);
+}
+
+    </script>
+  </body>
+</html>
