@@ -57,14 +57,13 @@ face), so the outline stays accurate from further away.
 It needs no body model, so it starts instantly. Only one of the two can be on at a time, and the Tile Size slider
 works for both.
 
-## Arms, legs, hands and fingers
+## Better outline in Body Trace
 
-Besides the six face features there are now **Left/Right Hand**, **Left/Right Arm**, **Left/Right Leg** and **Fingers**
-(the ten fingertips). They work exactly like the face features: boxes, Full View, the sliders, filters and the mosaic
-(Body Trace and Screen Trace). They use two extra models (pose and hands) that only download and run while a feature
-or Body Trace needs them, and the iPad shows "loading pose + hands model..." the first time. Body Trace also uses them
-to make the outline follow your arms, legs, hands and fingers more closely. These models make the sketch heavier, so on
-a slower laptop switch them off (turn those buttons off) when you do not need them.
+While Body Trace is on, two extra models run quietly: one finds your arms and legs and one finds your hands and
+fingers. Body Trace uses them so the outline follows your arms, legs, hands and fingers (the plain outline model is
+blurry on thin parts), and so the zoomed-in view of you does not cut off an outstretched arm. They only download and
+run while Body Trace is on, and the iPad shows "loading pose + hands model..." the first time. They make the sketch
+heavier, so on a slower laptop turn Body Trace off when you do not need it.
 
 ## If something goes wrong
 

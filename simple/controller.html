@@ -16,9 +16,8 @@
       }
       .info { color: #00ff00; font-family: monospace; font-size: 0.8em; text-align: center; }
       .info.bad { color: #ff5555; }
-      .layout { display: grid; grid-template-columns: 1fr 2.8fr 1fr; gap: 10px; min-height: 0; }
-      .subcols { display: grid; grid-template-columns: 1.7fr 1fr; gap: 10px; min-height: 0; }
-      .featgrid { display: grid; grid-template-columns: 1fr 1fr; grid-auto-rows: minmax(0, 1fr); gap: 8px; min-height: 0; min-width: 0; }
+      .layout { display: grid; grid-template-columns: 1fr 1.8fr 1fr; gap: 10px; min-height: 0; }
+      .subcols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-height: 0; }
       .col { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
       .btn, select {
         box-sizing: border-box; width: 100%; padding: 0 6px; border: none; border-radius: 8px;
@@ -59,11 +58,8 @@
 // (a direct browser-to-browser link made with PeerJS, using the pairing code) and redraws itself from the
 // state the sketch sends back, so it always shows what is really happening.
 
-// Same order as FEATURES in sketch.html (features are referred to by index). Left/right pairs sit side by side.
-const FEATURE_LABELS = [
-  'Left Eye', 'Right Eye', 'Left Eyebrow', 'Right Eyebrow', 'Nose', 'Mouth',
-  'Left Hand', 'Right Hand', 'Left Arm', 'Right Arm', 'Left Leg', 'Right Leg', 'Fingers',
-];
+// Same order as FEATURES in sketch.html (features are referred to by index).
+const FEATURE_LABELS = ['Left Eye', 'Right Eye', 'Left Eyebrow', 'Right Eyebrow', 'Nose', 'Mouth'];
 
 const MIN_SIZE = 20;
 const MAX_SIZE = 300;
@@ -110,7 +106,7 @@ function setup() {
   // column 2 is two columns: the features, then labels and the colour filters
   const mid = createDiv().class('subcols').parent(layout);
 
-  const featCol = createDiv().class('featgrid').parent(mid);
+  const featCol = createDiv().class('col').parent(mid);
   FEATURE_LABELS.forEach((label, idx) => {
     const b = createButton(label).class('btn').parent(featCol);
     tap(b, () => send({ name: 'toggleFeature', idx }));

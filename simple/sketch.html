@@ -40,56 +40,25 @@ let faces = [];
 // Each feature is a fixed-size square region of the video.
 // "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
 // Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
-// Body parts come from the pose model (arms, legs) and the hand model (hands, fingers). Each feature gives, for one
-// person `t`, the list of points it sits on: one point for most features, up to ten for Fingers.
+// Pose points (from the pose model) are only used to shape the Body Trace outline.
 const BODY_MIN_CONF = 0.3; // ignore pose points the model isn't at least this sure about
 const kp = (t, name) => {
   const k = t.pose && t.pose[name];
   return k && k.c >= BODY_MIN_CONF ? k : null;
 };
-const midPoint = (a, b) => (a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : a || b || null);
-const onePoint = (p) => (p ? [{ x: p.x, y: p.y }] : []);
 const facePoint = (get) => (t) => {
   const p = get(t.face);
   return p ? [{ x: p.centerX !== undefined ? p.centerX : p.x, y: p.centerY !== undefined ? p.centerY : p.y }] : [];
 };
-const PALM = ['wrist', 'index_finger_mcp', 'middle_finger_mcp', 'ring_finger_mcp', 'pinky_finger_mcp'];
-const TIPS = ['thumb_tip', 'index_finger_tip', 'middle_finger_tip', 'ring_finger_tip', 'pinky_finger_tip'];
-// the middle of a hand: from the hand model if it sees it, otherwise a little past the wrist along the forearm
-const handCentre = (t, side) => {
-  const h = t.hands && t.hands[side];
-  if (h) {
-    const ps = PALM.map((n) => h.kps[n]).filter(Boolean);
-    if (ps.length) return { x: ps.reduce((a, p) => a + p.x, 0) / ps.length, y: ps.reduce((a, p) => a + p.y, 0) / ps.length };
-  }
-  const w = kp(t, `${side}_wrist`);
-  const e = kp(t, `${side}_elbow`);
-  return w && e ? { x: w.x + 0.3 * (w.x - e.x), y: w.y + 0.3 * (w.y - e.y) } : w;
-};
-const fingertips = (t) => {
-  const out = [];
-  for (const side of ['left', 'right']) {
-    const h = t.hands && t.hands[side];
-    if (h) for (const n of TIPS) if (h.kps[n]) out.push({ x: h.kps[n].x, y: h.kps[n].y });
-  }
-  return out;
-};
 
-// `needs` says which extra models a feature requires. The ORDER matters: the controller refers to features by index.
+// The ORDER matters: the controller refers to features by index.
 const FEATURES = [
-  { label: 'Left Eye',      size: 100, needs: [], pts: facePoint((f) => f.leftEye) },
-  { label: 'Right Eye',     size: 100, needs: [], pts: facePoint((f) => f.rightEye) },
-  { label: 'Left Eyebrow',  size: 110, needs: [], pts: facePoint((f) => f.leftEyebrow) },
-  { label: 'Right Eyebrow', size: 110, needs: [], pts: facePoint((f) => f.rightEyebrow) },
-  { label: 'Nose',          size: 90,  needs: [], pts: facePoint((f) => f.keypoints[1]) },
-  { label: 'Mouth',         size: 130, needs: [], pts: facePoint((f) => f.lips) },
-  { label: 'Left Hand',     size: 140, needs: ['pose', 'hands'], pts: (t) => onePoint(handCentre(t, 'left')) },
-  { label: 'Right Hand',    size: 140, needs: ['pose', 'hands'], pts: (t) => onePoint(handCentre(t, 'right')) },
-  { label: 'Left Arm',      size: 160, needs: ['pose'], pts: (t) => onePoint(kp(t, 'left_elbow') || midPoint(kp(t, 'left_shoulder'), kp(t, 'left_wrist'))) },
-  { label: 'Right Arm',     size: 160, needs: ['pose'], pts: (t) => onePoint(kp(t, 'right_elbow') || midPoint(kp(t, 'right_shoulder'), kp(t, 'right_wrist'))) },
-  { label: 'Left Leg',      size: 170, needs: ['pose'], pts: (t) => onePoint(kp(t, 'left_knee') || midPoint(kp(t, 'left_hip'), kp(t, 'left_ankle'))) },
-  { label: 'Right Leg',     size: 170, needs: ['pose'], pts: (t) => onePoint(kp(t, 'right_knee') || midPoint(kp(t, 'right_hip'), kp(t, 'right_ankle'))) },
-  { label: 'Fingers',       size: 60,  needs: ['pose', 'hands'], pts: fingertips },
+  { label: 'Left Eye',      size: 100, pts: facePoint((f) => f.leftEye) },
+  { label: 'Right Eye',     size: 100, pts: facePoint((f) => f.rightEye) },
+  { label: 'Left Eyebrow',  size: 110, pts: facePoint((f) => f.leftEyebrow) },
+  { label: 'Right Eyebrow', size: 110, pts: facePoint((f) => f.rightEyebrow) },
+  { label: 'Nose',          size: 90,  pts: facePoint((f) => f.keypoints[1]) },
+  { label: 'Mouth',         size: 130, pts: facePoint((f) => f.lips) },
 ];
 
 const MIN_SIZE = 20;
@@ -121,13 +90,13 @@ const sk = (pid, idx, k) => `${pid}:${idx}:${k}`;
 const candidates = []; // every face seen lately, including brand-new ones not yet trusted: { id, x, y, face, lastSeen, seen }
 const tracks = []; // the people we trust (seen in several detections in a row): the ones everything else uses
 let lastFaces = null;  // the detection result we last processed, so each result is only counted once
-// the two optional body models (loaded and run only while something needs them)
+// the two optional body models (loaded and run only while Body Trace is on)
 const MODELS = {
-  pose:  { model: null, ready: false, running: false, results: [], version: 0 }, // arms, legs
-  hands: { model: null, ready: false, running: false, results: [], version: 0 }, // hands, fingers
+  pose:  { model: null, ready: false, running: false, results: [], version: 0 }, // where the arms and legs are
+  hands: { model: null, ready: false, running: false, results: [], version: 0 }, // where the hands and fingers are
 };
 let seenVersion = { pose: 0, hands: 0 }; // which model result each person was last matched against
-let wantModels = new Set();               // which extra models are needed right now
+let wantModels = new Set();               // which extra models are needed right now (Body Trace only)
 let boneCanvas = null;                    // scratch picture of the limbs and fingers, for Body Trace
 let nextPersonId = 1;
 let peopleKey = ''; // which people are in frame; when it changes the features get shuffled between them
@@ -193,11 +162,11 @@ function draw() {
   const vh = video.elt.videoHeight || video.height;
   const view = coverView(vw, vh);
 
-  // the features in play (for Body Trace / Screen Trace with nothing highlighted: all of them), and the models they need
+  // the features in play (for Body Trace / Screen Trace with nothing highlighted: all of them)
   const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
-  wantModels = new Set();
-  inUse.forEach((idx) => FEATURES[idx].needs.forEach((n) => wantModels.add(n)));
-  if (bodyTrace) ['pose', 'hands'].forEach((n) => wantModels.add(n)); // arms, legs and fingers shape the outline too
+
+  // the pose and hand models only run for Body Trace, where they make the outline follow arms, legs and fingers
+  wantModels = new Set(bodyTrace ? ['pose', 'hands'] : []);
   syncModels();
 
   updatePeople();
@@ -679,7 +648,7 @@ function zoomedIn(box) {
   return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
 }
 
-// ---- extra body models (pose, hands) ----
+// ---- extra body models (pose, hands): only used to improve the Body Trace outline ----
 
 function ensureModel(kind) {
   const m = MODELS[kind];
