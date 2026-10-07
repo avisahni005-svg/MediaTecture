@@ -56,6 +56,8 @@ const MIN_SIZE = 20;
 const MAX_SIZE = 300;
 const MIN_ZOOM = 1;
 const MAX_ZOOM = 5;
+const MIN_TILE = 14; // mosaic tile size range, same as the sketch
+const MAX_TILE = 120;
 
 let peer;         // our end of the PeerJS link
 let conn;         // the link to the sketch on the laptop
@@ -70,7 +72,7 @@ let linked = false;
 let state = null; // what the sketch last reported
 let sketchStatus = { people: 0, cameras: [], activeCamera: null };
 
-let bodyBtn, infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
+let tileLabel, tileSlider, bodyBtn, infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
 const featBtns = [];
 const fxBtns = { in: {}, out: {} };
 let cameraListKey = '';
@@ -150,6 +152,16 @@ function setup() {
   zoomSlider.input(() => send({ name: 'setZoom', value: zoomSlider.value() }));
   holdWhileDragging(zoomSlider, 'zoom');
 
+  // mosaic tile size (for Body Trace)
+  const tileBox = createDiv().class('slider-box').parent(right);
+  tileLabel = createDiv('TILE SIZE').parent(tileBox);
+  tileSlider = createSlider(MIN_TILE, MAX_TILE, 28, 1).parent(tileBox);
+  const tends = createDiv().class('ends').parent(tileBox);
+  createSpan('SMALL').parent(tends);
+  createSpan('LARGE').parent(tends);
+  tileSlider.input(() => send({ name: 'setTileSize', value: tileSlider.value() }));
+  holdWhileDragging(tileSlider, 'tile');
+
   start();
   render();
 }
@@ -208,6 +220,8 @@ function render() {
 
   sizeLabel.html(`BOX SIZE: ${state.features[state.current].label.toUpperCase()}`);
   if (!dragging.has('size')) sizeSlider.value(MIN_SIZE + MAX_SIZE - state.features[state.current].size);
+  tileLabel.html(`TILE SIZE: ${Math.round(state.tileSize)}`);
+  if (!dragging.has('tile')) tileSlider.value(state.tileSize);
   zoomLabel.html(`ZOOM INSIDE BOX: ${state.zoom.toFixed(1)}x`);
   if (!dragging.has('zoom')) zoomSlider.value(state.zoom);
 }

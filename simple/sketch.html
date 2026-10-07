@@ -93,7 +93,9 @@ const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
 let lastPreviewAt = 0;
 
 // ---- body trace (mosaic) ----
-const MOSAIC_TILES = 28; // how many tiles fit across the shorter side of the screen
+const MIN_TILE = 14;     // smallest / largest mosaic tile, in "800 pixel screen" units like the box sizes
+const MAX_TILE = 120;
+let tileSize = 28;       // current mosaic tile size (the controller's Tile Size slider)
 const SEG_WIDTH = 256;   // the body model looks at a small copy of the picture (fast), this wide
 let bodySeg = null;      // ml5 body segmentation model, only loaded the first time Body Trace is switched on
 let bodySegReady = false;
@@ -279,7 +281,7 @@ function drawBodyTrace(ctx, vw, vh, view, inUse) {
   if (tracks.length > 0) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
   const isPerson = (vx, vy) => alphaAt(vx, vy) > 127 === maskPersonOpaque;
 
-  const T = Math.max(16, Math.round(Math.min(width, height) / MOSAIC_TILES));
+  const T = Math.max(8, Math.round((tileSize * Math.min(width, height)) / 800));
   const cols = Math.ceil(width / T);
   const rows = Math.ceil(height / T);
   if (mosaicKey !== `${cols}x${rows}`) {
@@ -563,6 +565,9 @@ function applyCommand(c) {
     case 'setZoom':
       if (isFinite(c.value)) zoom = constrain(Number(c.value), MIN_ZOOM, MAX_ZOOM);
       break;
+    case 'setTileSize':
+      if (isFinite(c.value)) tileSize = constrain(Number(c.value), MIN_TILE, MAX_TILE);
+      break;
     case 'toggleBodyTrace':
       setBodyTrace(!bodyTrace);
       break;
@@ -664,6 +669,7 @@ function publishState() {
       fullView,
       bodyTrace,
       bodyLoading: bodyTrace && !bodySegReady,
+      tileSize,
       showLabels,
       fxIn,
       fxOut,
