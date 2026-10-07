@@ -489,8 +489,13 @@ function startCamera(deviceId) {
   if (deviceId) constraints.video.deviceId = { exact: deviceId };
   const vid = createCapture(constraints, listCameras);
   video = vid;
-  vid.size(800, 800);
   vid.hide();
+  // The face tracker reports positions in the video element's own width/height, so that must equal the camera's
+  // real pixel size. (Forcing the element to 800x800 while the camera sends 1280x720 put every box in the wrong place.)
+  vid.elt.addEventListener('loadedmetadata', () => {
+    vid.elt.width = vid.elt.videoWidth;
+    vid.elt.height = vid.elt.videoHeight;
+  });
 
   const startTracking = () => {
     if (vid !== video) return; // the user already switched to another camera
