@@ -40,14 +40,56 @@ let faces = [];
 // Each feature is a fixed-size square region of the video.
 // "left"/"right" are the subject's own sides, which is also what the mirrored view shows.
 // Nose uses a single face keypoint (1 = nose tip) since faceMesh has no nose region.
-// The ORDER matters: the controller refers to features by their index here.
+// Body parts come from the pose model (arms, legs) and the hand model (hands, fingers). Each feature gives, for one
+// person `t`, the list of points it sits on: one point for most features, up to ten for Fingers.
+const BODY_MIN_CONF = 0.3; // ignore pose points the model isn't at least this sure about
+const kp = (t, name) => {
+  const k = t.pose && t.pose[name];
+  return k && k.c >= BODY_MIN_CONF ? k : null;
+};
+const midPoint = (a, b) => (a && b ? { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 } : a || b || null);
+const onePoint = (p) => (p ? [{ x: p.x, y: p.y }] : []);
+const facePoint = (get) => (t) => {
+  const p = get(t.face);
+  return p ? [{ x: p.centerX !== undefined ? p.centerX : p.x, y: p.centerY !== undefined ? p.centerY : p.y }] : [];
+};
+const PALM = ['wrist', 'index_finger_mcp', 'middle_finger_mcp', 'ring_finger_mcp', 'pinky_finger_mcp'];
+const TIPS = ['thumb_tip', 'index_finger_tip', 'middle_finger_tip', 'ring_finger_tip', 'pinky_finger_tip'];
+// the middle of a hand: from the hand model if it sees it, otherwise a little past the wrist along the forearm
+const handCentre = (t, side) => {
+  const h = t.hands && t.hands[side];
+  if (h) {
+    const ps = PALM.map((n) => h.kps[n]).filter(Boolean);
+    if (ps.length) return { x: ps.reduce((a, p) => a + p.x, 0) / ps.length, y: ps.reduce((a, p) => a + p.y, 0) / ps.length };
+  }
+  const w = kp(t, `${side}_wrist`);
+  const e = kp(t, `${side}_elbow`);
+  return w && e ? { x: w.x + 0.3 * (w.x - e.x), y: w.y + 0.3 * (w.y - e.y) } : w;
+};
+const fingertips = (t) => {
+  const out = [];
+  for (const side of ['left', 'right']) {
+    const h = t.hands && t.hands[side];
+    if (h) for (const n of TIPS) if (h.kps[n]) out.push({ x: h.kps[n].x, y: h.kps[n].y });
+  }
+  return out;
+};
+
+// `needs` says which extra models a feature requires. The ORDER matters: the controller refers to features by index.
 const FEATURES = [
-  { label: 'Left Eye',      size: 100, center: (f) => f.leftEye },
-  { label: 'Right Eye',     size: 100, center: (f) => f.rightEye },
-  { label: 'Left Eyebrow',  size: 110, center: (f) => f.leftEyebrow },
-  { label: 'Right Eyebrow', size: 110, center: (f) => f.rightEyebrow },
-  { label: 'Nose',          size: 90,  center: (f) => f.keypoints[1] },
-  { label: 'Mouth',         size: 130, center: (f) => f.lips },
+  { label: 'Left Eye',      size: 100, needs: [], pts: facePoint((f) => f.leftEye) },
+  { label: 'Right Eye',     size: 100, needs: [], pts: facePoint((f) => f.rightEye) },
+  { label: 'Left Eyebrow',  size: 110, needs: [], pts: facePoint((f) => f.leftEyebrow) },
+  { label: 'Right Eyebrow', size: 110, needs: [], pts: facePoint((f) => f.rightEyebrow) },
+  { label: 'Nose',          size: 90,  needs: [], pts: facePoint((f) => f.keypoints[1]) },
+  { label: 'Mouth',         size: 130, needs: [], pts: facePoint((f) => f.lips) },
+  { label: 'Left Hand',     size: 140, needs: ['pose', 'hands'], pts: (t) => onePoint(handCentre(t, 'left')) },
+  { label: 'Right Hand',    size: 140, needs: ['pose', 'hands'], pts: (t) => onePoint(handCentre(t, 'right')) },
+  { label: 'Left Arm',      size: 160, needs: ['pose'], pts: (t) => onePoint(kp(t, 'left_elbow') || midPoint(kp(t, 'left_shoulder'), kp(t, 'left_wrist'))) },
+  { label: 'Right Arm',     size: 160, needs: ['pose'], pts: (t) => onePoint(kp(t, 'right_elbow') || midPoint(kp(t, 'right_shoulder'), kp(t, 'right_wrist'))) },
+  { label: 'Left Leg',      size: 170, needs: ['pose'], pts: (t) => onePoint(kp(t, 'left_knee') || midPoint(kp(t, 'left_hip'), kp(t, 'left_ankle'))) },
+  { label: 'Right Leg',     size: 170, needs: ['pose'], pts: (t) => onePoint(kp(t, 'right_knee') || midPoint(kp(t, 'right_hip'), kp(t, 'right_ankle'))) },
+  { label: 'Fingers',       size: 60,  needs: ['pose', 'hands'], pts: fingertips },
 ];
 
 const MIN_SIZE = 20;
@@ -74,10 +116,19 @@ let fxIn = 'none';             // 'none' | 'mono' | 'duo': filter for the footag
 let fxOut = 'none';            // ...and for everything outside them
 
 // ---- people ----
-const smooth = {}; // smoothed position per person+feature, keyed 'personId:featureIndex'
+const smooth = {}; // smoothed position per person+feature+point, keyed 'personId:featureIndex:pointNumber'
+const sk = (pid, idx, k) => `${pid}:${idx}:${k}`;
 const candidates = []; // every face seen lately, including brand-new ones not yet trusted: { id, x, y, face, lastSeen, seen }
 const tracks = []; // the people we trust (seen in several detections in a row): the ones everything else uses
 let lastFaces = null;  // the detection result we last processed, so each result is only counted once
+// the two optional body models (loaded and run only while something needs them)
+const MODELS = {
+  pose:  { model: null, ready: false, running: false, results: [], version: 0 }, // arms, legs
+  hands: { model: null, ready: false, running: false, results: [], version: 0 }, // hands, fingers
+};
+let seenVersion = { pose: 0, hands: 0 }; // which model result each person was last matched against
+let wantModels = new Set();               // which extra models are needed right now
+let boneCanvas = null;                    // scratch picture of the limbs and fingers, for Body Trace
 let nextPersonId = 1;
 let peopleKey = ''; // which people are in frame; when it changes the features get shuffled between them
 const perms = {};   // featureIndex -> { personId: id of the person whose feature is shown on them }
@@ -142,35 +193,47 @@ function draw() {
   const vh = video.elt.videoHeight || video.height;
   const view = coverView(vw, vh);
 
+  // the features in play (for Body Trace / Screen Trace with nothing highlighted: all of them), and the models they need
+  const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
+  wantModels = new Set();
+  inUse.forEach((idx) => FEATURES[idx].needs.forEach((n) => wantModels.add(n)));
+  if (bodyTrace) ['pose', 'hands'].forEach((n) => wantModels.add(n)); // arms, legs and fingers shape the outline too
+  syncModels();
+
   updatePeople();
 
-  // follow every highlighted feature on every person in frame (for Body Trace with nothing highlighted: all of them)
-  const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
+  // follow every point of every highlighted feature on every person in frame
   inUse.forEach((idx) => {
     const f = FEATURES[idx];
     for (const t of tracks) {
-      const p = f.center(t.face);
-      if (!p) continue;
-      const px = p.centerX !== undefined ? p.centerX : p.x;
-      const py = p.centerY !== undefined ? p.centerY : p.y;
-      const key = `${t.id}:${idx}`;
-      const prev = smooth[key];
-      smooth[key] = prev ? { x: lerp(prev.x, px, SMOOTHING), y: lerp(prev.y, py, SMOOTHING) } : { x: px, y: py };
+      const pts = f.pts(t);
+      t.n = t.n || {};
+      const before = t.n[idx] || 0;
+      t.n[idx] = pts.length;
+      pts.forEach((p, k) => {
+        const key = sk(t.id, idx, k);
+        const prev = smooth[key];
+        smooth[key] = prev ? { x: lerp(prev.x, p.x, SMOOTHING), y: lerp(prev.y, p.y, SMOOTHING) } : { x: p.x, y: p.y };
+      });
+      for (let k = pts.length; k < before; k++) delete smooth[sk(t.id, idx, k)]; // points that vanished
     }
   });
 
-  // one box per person per highlighted feature. The box sits on that person's feature (`at`), but what it shows
-  // comes from whoever the shuffle assigned (`from`), so features appear to swap between people.
+  // one box per person per point of each highlighted feature. The box sits on that person's feature (`at`), but what it
+  // shows comes from whoever the shuffle assigned (`from`), so features appear to swap between people.
   const boxes = [];
   selected.forEach((idx) => {
     const f = FEATURES[idx];
     const side = boxSide(vw, vh, f.size);
     for (const t of tracks) {
-      const at = smooth[`${t.id}:${idx}`];
-      if (!at) continue;
-      const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
-      const from = smooth[`${fromId}:${idx}`] || at;
-      boxes.push({ at, from, side, label: f.label });
+      const n = (t.n && t.n[idx]) || 0;
+      for (let k = 0; k < n; k++) {
+        const at = smooth[sk(t.id, idx, k)];
+        if (!at) continue;
+        const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
+        const from = smooth[sk(fromId, idx, k)] || at;
+        boxes.push({ at, from, side, label: f.label });
+      }
     }
   });
 
@@ -201,15 +264,8 @@ function draw() {
   }
 
   if (boxes.length === 0) {
-    // no face yet: show the plain mirrored camera so it's clear the sketch is alive
+    // nothing found yet (no face, or the body part isn't visible): just show the plain mirrored camera
     drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
-    fill(0, 160);
-    noStroke();
-    rect(0, height / 2 - 30, width, 60);
-    fill(255);
-    textSize(24);
-    textAlign(CENTER, CENTER);
-    text('Looking for a face...', width / 2, height / 2);
     maybeSendPreview(vw, vh, boxes);
     return;
   }
@@ -291,14 +347,29 @@ function bodyCropRect(vw, vh) {
   const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
   if (tracks.length === 0) return whole;
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const grow = (x, y) => {
+    x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y);
+  };
   for (const t of tracks) {
     const b = faceBox(t.face);
-    x0 = Math.min(x0, b.x + b.w / 2 - 3.5 * b.w);
-    x1 = Math.max(x1, b.x + b.w / 2 + 3.5 * b.w);
-    y0 = Math.min(y0, b.y - b.h);
-    y1 = Math.max(y1, b.y + 8 * b.h);
+    const known = t.pose ? Object.values(t.pose).filter((k) => k.c >= BODY_MIN_CONF) : [];
+    if (known.length >= 4) {
+      // we can see where the limbs actually are: include every joint, and the fingers, with a margin
+      for (const k of known) grow(k.x, k.y);
+      for (const side of ['left', 'right']) {
+        const h = t.hands && t.hands[side];
+        if (h) for (const p of Object.values(h.kps)) grow(p.x, p.y);
+      }
+      grow(b.x - b.w, b.y - b.h);
+      grow(b.x + 2 * b.w, b.y + 2 * b.h);
+    } else {
+      // only the face is known: a body is roughly 9 face-heights tall and 7 face-widths wide
+      grow(b.x + b.w / 2 - 3.5 * b.w, b.y - b.h);
+      grow(b.x + b.w / 2 + 3.5 * b.w, b.y + 8 * b.h);
+    }
   }
-  x0 = Math.max(0, x0); y0 = Math.max(0, y0); x1 = Math.min(vw, x1); y1 = Math.min(vh, y1);
+  const pad = 0.1 * Math.max(x1 - x0, y1 - y0);
+  x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(vw, x1 + pad); y1 = Math.min(vh, y1 + pad);
   const side = Math.max(x1 - x0, y1 - y0);
   if (side >= 0.98 * Math.min(vw, vh)) return whole; // the people fill the picture anyway
   return { sx: constrain((x0 + x1) / 2 - side / 2, 0, vw - side), sy: constrain((y0 + y1) / 2 - side / 2, 0, vh - side), sw: side, sh: side };
@@ -329,7 +400,10 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
       return latestMask.data[(y * mw + x) * 4 + 3];
     };
     if (tracks.length > 0 && inside(tracks[0].x, tracks[0].y)) maskPersonOpaque = alphaAt(tracks[0].x, tracks[0].y) > 127;
-    isPerson = (vx, vy) => inside(vx, vy) && alphaAt(vx, vy) > 127 === maskPersonOpaque;
+    // the silhouette, plus the arms, legs, hands and fingers the pose and hand models found (the silhouette alone
+    // is blurry on thin parts like fingers)
+    const bones = buildBoneMask(vw, vh);
+    isPerson = (vx, vy) => (inside(vx, vy) && alphaAt(vx, vy) > 127 === maskPersonOpaque) || (bones && bones.at(vx, vy));
   }
 
   const T = Math.max(8, Math.round((tileSize * Math.min(width, height)) / 800));
@@ -337,9 +411,24 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
   const rows = Math.ceil(height / T);
   if (mosaicKey !== `${cols}x${rows}`) {
     mosaicKey = `${cols}x${rows}`;
-    mosaicCells = Array.from({ length: cols * rows }, () => ({ fi: -1, pid: -1 }));
+    mosaicCells = Array.from({ length: cols * rows }, () => ({ fi: -1, pid: -1, k: 0 }));
   }
-  const feats = [...inUse];
+
+  // every (person, feature, point) a tile could show right now, grouped by feature so each feature gets equal say
+  const byFeature = new Map();
+  const valid = new Set();
+  for (const idx of inUse) {
+    for (const t of tracks) {
+      const n = (t.n && t.n[idx]) || 0;
+      for (let k = 0; k < n; k++) {
+        if (!smooth[sk(t.id, idx, k)]) continue;
+        if (!byFeature.has(idx)) byFeature.set(idx, []);
+        byFeature.get(idx).push({ pid: t.id, k });
+        valid.add(sk(t.id, idx, k));
+      }
+    }
+  }
+  const featureIds = [...byFeature.keys()];
   const reach = T * 0.3;
   let drawn = 0;
 
@@ -354,16 +443,19 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
         const vy = (cy + dy - view.oy) / view.scale;
         if (!screenTrace && isPerson(vx, vy)) hits++;
       }
-      if (hits < 3) continue;
+      if (hits < 3 || featureIds.length === 0) continue;
 
-      // each tile picks a random highlighted feature of a random person, and now and then picks again
+      // each tile picks a random highlighted feature (of a random person), and now and then picks again
       const cell = mosaicCells[r * cols + c];
-      const stale = cell.fi < 0 || !feats.includes(cell.fi) || !tracks.some((t) => t.id === cell.pid);
+      const stale = cell.fi < 0 || !valid.has(sk(cell.pid, cell.fi, cell.k));
       if (stale || Math.random() < 0.012) {
-        cell.fi = feats[Math.floor(Math.random() * feats.length)];
-        cell.pid = tracks.length ? tracks[Math.floor(Math.random() * tracks.length)].id : -1;
+        cell.fi = featureIds[Math.floor(Math.random() * featureIds.length)];
+        const options = byFeature.get(cell.fi);
+        const pick = options[Math.floor(Math.random() * options.length)];
+        cell.pid = pick.pid;
+        cell.k = pick.k;
       }
-      const at = smooth[`${cell.pid}:${cell.fi}`];
+      const at = smooth[sk(cell.pid, cell.fi, cell.k)];
       if (!at) continue;
       const patch = zoomedIn(squareRect(vw, vh, at, boxSide(vw, vh, FEATURES[cell.fi].size)));
       drawFiltered(ctx, patch, c * T + 1, r * T + 1, T - 2, T - 2, fxIn);
@@ -371,8 +463,88 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
     }
   }
 
-  // nothing to show yet (no face found): show the plain camera instead of a dead black screen
+  // nothing to show yet (nothing found): show the plain camera instead of a dead black screen
   if (drawn === 0) drawFiltered(ctx, view.src, 0, 0, width, height, 'none');
+}
+
+// A small picture (in camera orientation) with the arms, legs, hands and fingers drawn as thick lines, so Body Trace
+// can count them as body even where the silhouette model is too coarse. Returns { at(vx, vy) } or null.
+const LIMBS = [
+  ['left_shoulder', 'left_elbow'], ['left_elbow', 'left_wrist'],
+  ['right_shoulder', 'right_elbow'], ['right_elbow', 'right_wrist'],
+  ['left_hip', 'left_knee'], ['left_knee', 'left_ankle'],
+  ['right_hip', 'right_knee'], ['right_knee', 'right_ankle'],
+];
+const FINGER_CHAINS = [
+  ['thumb_cmc', 'thumb_mcp', 'thumb_ip', 'thumb_tip'],
+  ['index_finger_mcp', 'index_finger_pip', 'index_finger_dip', 'index_finger_tip'],
+  ['middle_finger_mcp', 'middle_finger_pip', 'middle_finger_dip', 'middle_finger_tip'],
+  ['ring_finger_mcp', 'ring_finger_pip', 'ring_finger_dip', 'ring_finger_tip'],
+  ['pinky_finger_mcp', 'pinky_finger_pip', 'pinky_finger_dip', 'pinky_finger_tip'],
+];
+function buildBoneMask(vw, vh) {
+  const w = 320;
+  const h = Math.round((w * vh) / vw);
+  const s = w / vw;
+  if (!boneCanvas) boneCanvas = document.createElement('canvas');
+  if (boneCanvas.width !== w || boneCanvas.height !== h) {
+    boneCanvas.width = w;
+    boneCanvas.height = h;
+  }
+  const c = boneCanvas.getContext('2d', { willReadFrequently: true });
+  c.clearRect(0, 0, w, h);
+  c.strokeStyle = '#000';
+  c.fillStyle = '#000';
+  c.lineCap = 'round';
+  c.lineJoin = 'round';
+  let any = false;
+  for (const t of tracks) {
+    const fw = faceBox(t.face).w; // limbs and fingers are drawn in proportion to the person's head
+    if (t.pose) {
+      c.lineWidth = Math.max(2, fw * 0.55 * s);
+      for (const [a, b] of LIMBS) {
+        const A = kp(t, a);
+        const B = kp(t, b);
+        if (!A || !B) continue;
+        c.beginPath();
+        c.moveTo(A.x * s, A.y * s);
+        c.lineTo(B.x * s, B.y * s);
+        c.stroke();
+        any = true;
+      }
+    }
+    for (const side of ['left', 'right']) {
+      const hand = t.hands && t.hands[side];
+      if (!hand) continue;
+      const k = hand.kps;
+      c.lineWidth = Math.max(2, fw * 0.16 * s);
+      for (const chain of FINGER_CHAINS) {
+        const pts = ['wrist', ...chain].map((n) => k[n]).filter(Boolean);
+        if (pts.length < 2) continue;
+        c.beginPath();
+        c.moveTo(pts[0].x * s, pts[0].y * s);
+        for (const p of pts.slice(1)) c.lineTo(p.x * s, p.y * s);
+        c.stroke();
+      }
+      const palm = ['wrist', 'thumb_cmc', 'index_finger_mcp', 'middle_finger_mcp', 'ring_finger_mcp', 'pinky_finger_mcp'].map((n) => k[n]).filter(Boolean);
+      if (palm.length > 2) {
+        c.beginPath();
+        palm.forEach((p, i) => (i ? c.lineTo(p.x * s, p.y * s) : c.moveTo(p.x * s, p.y * s)));
+        c.closePath();
+        c.fill();
+      }
+      any = true;
+    }
+  }
+  if (!any) return null;
+  const data = c.getImageData(0, 0, w, h).data;
+  return {
+    at: (vx, vy) => {
+      const x = Math.floor(vx * s);
+      const y = Math.floor(vy * s);
+      return x >= 0 && y >= 0 && x < w && y < h && data[(y * w + x) * 4 + 3] > 127;
+    },
+  };
 }
 
 // How the camera fills the canvas without stretching ("cover": the longer side is cropped).
@@ -507,10 +679,128 @@ function zoomedIn(box) {
   return { sx: box.sx + (box.sw - sw) / 2, sy: box.sy + (box.sh - sh) / 2, sw, sh };
 }
 
+// ---- extra body models (pose, hands) ----
+
+function ensureModel(kind) {
+  const m = MODELS[kind];
+  if (m.model) return;
+  const loaded = () => {
+    m.ready = true;
+    publishState(); // the controller stops showing "loading"
+  };
+  m.model = kind === 'pose'
+    ? ml5.bodyPose('MoveNet', { modelType: 'MULTIPOSE_LIGHTNING' }, loaded)
+    : ml5.handPose({ maxHands: 6, modelType: 'lite' }, loaded);
+}
+
+// start the models something needs, stop the ones nothing needs
+function syncModels() {
+  for (const kind of ['pose', 'hands']) {
+    const m = MODELS[kind];
+    if (wantModels.has(kind)) {
+      ensureModel(kind);
+      if (m.ready && !m.running && video) {
+        m.running = true;
+        m.model.detectStart(video, (results) => {
+          m.results = results;
+          m.version++;
+        });
+      }
+    } else if (m.running) {
+      m.model.detectStop();
+      m.running = false;
+      m.results = [];
+      m.version++;
+    }
+  }
+}
+
+// a new camera means new video: drop the models so they start fresh on it
+function resetBodyModels() {
+  for (const kind of ['pose', 'hands']) {
+    const m = MODELS[kind];
+    if (m.running) m.model.detectStop();
+    Object.assign(m, { model: null, ready: false, running: false, results: [], version: m.version + 1 });
+  }
+  for (const t of candidates) {
+    t.pose = null;
+    t.hands = null;
+  }
+}
+
+// Match the pose and hand results to the people we are tracking: a pose belongs to the person whose nose is closest,
+// and a hand belongs to the person whose pose wrist is closest.
+function attachBodies(vw) {
+  const now = millis();
+  const P = MODELS.pose;
+  const H = MODELS.hands;
+
+  if (P.version !== seenVersion.pose) {
+    seenVersion.pose = P.version;
+    const used = new Set();
+    for (const t of tracks) {
+      let best = -1;
+      let bestDist = vw * 0.2;
+      P.results.forEach((pose, i) => {
+        if (used.has(i)) return;
+        const n = (pose.keypoints || []).find((k) => k.name === 'nose');
+        if (!n || n.confidence < 0.2) return;
+        const d = dist(n.x, n.y, t.x, t.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = i;
+        }
+      });
+      if (best >= 0) {
+        used.add(best);
+        const dict = {};
+        for (const k of P.results[best].keypoints) dict[k.name] = { x: k.x, y: k.y, c: k.confidence };
+        t.pose = dict;
+        t.poseAt = now;
+      }
+    }
+  }
+  for (const t of tracks) if (t.pose && now - t.poseAt > 800) t.pose = null;
+
+  if (H.version !== seenVersion.hands) {
+    seenVersion.hands = H.version;
+    const used = new Set();
+    for (const t of tracks) {
+      for (const side of ['left', 'right']) {
+        const w = kp(t, `${side}_wrist`);
+        if (!w) continue;
+        let best = -1;
+        let bestDist = vw * 0.15;
+        H.results.forEach((hand, i) => {
+          if (used.has(i)) return;
+          const hw = (hand.keypoints || []).find((k) => k.name === 'wrist');
+          if (!hw) return;
+          const d = dist(hw.x, hw.y, w.x, w.y);
+          if (d < bestDist) {
+            bestDist = d;
+            best = i;
+          }
+        });
+        if (best >= 0) {
+          used.add(best);
+          const kps = {};
+          for (const k of H.results[best].keypoints) kps[k.name] = { x: k.x, y: k.y };
+          t.hands = t.hands || {};
+          t.hands[side] = { kps, at: now };
+        }
+      }
+    }
+  }
+  for (const t of tracks) {
+    if (!t.hands) continue;
+    for (const side of ['left', 'right']) if (t.hands[side] && now - t.hands[side].at > 600) delete t.hands[side];
+  }
+}
+
 // ---- several people ----
 
 function clearSmooth(idx) {
-  for (const k in smooth) if (idx === undefined || k.endsWith(`:${idx}`)) delete smooth[k];
+  for (const k in smooth) if (idx === undefined || k.split(':')[1] === String(idx)) delete smooth[k];
 }
 
 // Match this frame's faces to the people seen before (nearest nose position), add newcomers, drop people who left.
@@ -559,6 +849,7 @@ function updatePeople() {
   tracks.length = 0;
   for (const t of candidates) if (t.seen >= CONFIRM_HITS) tracks.push(t);
   tracks.sort((a, b) => a.id - b.id);
+  attachBodies(vw);
 
   const key = tracks.map((t) => t.id).join(',');
   if (key !== peopleKey) {
@@ -718,6 +1009,7 @@ function startCamera(deviceId) {
   tracks.length = 0; // everyone is re-detected from the new camera
   candidates.length = 0;
   lastFaces = null;
+  resetBodyModels();
   peopleKey = '';
   clearSmooth();
   const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
@@ -779,6 +1071,7 @@ function publishState() {
       bodyTrace,
       screenTrace,
       bodyLoading: bodyTrace && !bodySegReady,
+      loading: [bodyTrace && !bodySegReady ? 'outline' : null, wantModels.has('pose') && !MODELS.pose.ready ? 'pose' : null, wantModels.has('hands') && !MODELS.hands.ready ? 'hands' : null].filter(Boolean),
       tileSize,
       showLabels,
       fxIn,
