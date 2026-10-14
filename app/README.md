@@ -22,9 +22,15 @@ The app is built for you by GitHub.
 6. Open the downloaded file and drag **Face Projection** into **Applications**.
 
 ### First time you open it
-The app is not signed with an Apple developer account, so macOS will complain the first time:
-**right-click** (or Control-click) the app in Applications, choose **Open**, then click **Open** again.
-If it still says it is damaged, open Terminal once and run: `xattr -cr "/Applications/Face Projection.app"`.
+The app is not signed with an Apple developer account, so macOS is cautious the first time:
+- Try **right-click** (or Control-click) the app in Applications, choose **Open**, then click **Open** again.
+- On newer macOS versions (Sequoia and later) that may not offer Open. Then open the app once, close the warning,
+  go to **System Settings > Privacy & Security**, scroll down and click **Open Anyway** next to Face Projection.
+- If it says the app is **damaged**, open Terminal once and run these two lines (use Cancel on the warning, not Move to Trash):
+  ```
+  xattr -cr "/Applications/Face Projection.app"
+  codesign --force --deep --sign - "/Applications/Face Projection.app"
+  ```
 When it asks for camera access, click **OK**.
 
 ## Using it

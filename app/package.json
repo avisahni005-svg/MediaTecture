@@ -55,6 +55,7 @@
         "NSCameraUsageDescription": "Face Projection uses the camera to find faces and bodies."
       },
       "artifactName": "Face-Projection-${version}-${arch}.${ext}"
-    }
+    },
+    "afterPack": "scripts/adhoc-sign.js"
   }
 }
