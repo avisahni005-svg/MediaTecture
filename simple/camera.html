@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>Face Projection (Camera)</title>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <style>
+      html, body { margin: 0; height: 100%; background: #000; color: #00ff00; font-family: monospace; }
+      main { height: 100vh; height: 100dvh; display: flex; flex-direction: column; gap: 10px; padding: 12px; box-sizing: border-box; }
+      #status { text-align: center; font-size: 15px; }
+      #status.bad { color: #ff5555; }
+      #preview { flex: 1 1 0; min-height: 0; width: 100%; object-fit: contain; background: #111; border: 2px solid #00ff00; box-sizing: border-box; }
+      .row { display: flex; gap: 10px; }
+      button, select { flex: 1; min-width: 0; padding: 16px 8px; border: none; border-radius: 8px; background: #00ff00; color: #000; font: 16px monospace; cursor: pointer; }
+      small { text-align: center; opacity: 0.7; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div id="status">Starting...</div>
+      <video id="preview" playsinline muted autoplay></video>
+      <div class="row">
+        <select id="cams"></select>
+        <button id="flip">Flip camera</button>
+      </div>
+      <small id="code"></small>
+    </main>
+    <script>
+// Turns this device (a phone, a tablet, another laptop) into the camera for the face projection sketch.
+// Open it on the device, allow the camera, and the sketch on the main computer uses this picture.
+
+// Same pairing code as the sketch page, so it connects on its own. To use your own code, put it in both addresses:
+// sketch.html#MYCODE and camera.html#MYCODE.
+const DEFAULT_CODE = 'FP-X7K2Q9M4';
+const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
+
+const $ = (id) => document.getElementById(id);
+let stream = null;
+let peer = null;
+let call = null;
+let facing = 'environment'; // start on the back camera, which is usually the one you want
+let retryTimer = null;
+
+function say(text, bad) {
+  $('status').textContent = text;
+  $('status').className = bad ? 'bad' : '';
+}
+
+// Normally the free PeerJS cloud introduces the devices to each other. To use your own PeerJS server instead,
+// add ?peerhost=HOST&peerport=PORT (and &secure=1 for https) to the address.
+function peerOptions() {
+  const q = new URLSearchParams(location.search);
+  const host = q.get('peerhost');
+  return host ? { host, port: Number(q.get('peerport')) || 9000, path: q.get('peerpath') || '/', secure: q.get('secure') === '1' } : {};
+}
+
+async function startCamera(deviceId) {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  const video = deviceId
+    ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+    : { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } };
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video, audio: false });
+  } catch (e) {
+    say('Could not open the camera: ' + e.name + '. Allow camera access and reload.', true);
+    return;
+  }
+  $('preview').srcObject = stream;
+  await fillCameraList();
+
+  const track = stream.getVideoTracks()[0];
+  const sender = call && call.peerConnection && call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
+  if (sender) sender.replaceTrack(track); // already streaming: swap the picture without reconnecting
+  else connectToSketch();
+}
+
+async function fillCameraList() {
+  const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
+  const active = stream && stream.getVideoTracks()[0] && stream.getVideoTracks()[0].getSettings().deviceId;
+  $('cams').innerHTML = '';
+  devices.forEach((d, i) => {
+    const o = document.createElement('option');
+    o.value = d.deviceId;
+    o.textContent = d.label || `Camera ${i + 1}`;
+    if (d.deviceId === active) o.selected = true;
+    $('cams').appendChild(o);
+  });
+}
+
+function connectToSketch() {
+  clearTimeout(retryTimer);
+  if (!peer || !peer.open || !stream) return;
+  say('Looking for the sketch...');
+  call = peer.call('faceproj-' + PAIRING_CODE, stream);
+  const lost = () => {
+    if (call) call = null;
+    say('Not connected. Is the sketch open on the main computer? Retrying...', true);
+    retryTimer = setTimeout(connectToSketch, 2500);
+  };
+  call.on('close', lost);
+  call.on('error', lost);
+  // the sketch answers without sending anything back, so watch the connection itself
+  const watch = setInterval(() => {
+    if (!call) return clearInterval(watch);
+    const st = call.peerConnection && call.peerConnection.iceConnectionState;
+    if (st === 'connected' || st === 'completed') say('Streaming this camera to the sketch');
+    if (st === 'failed' || st === 'closed') {
+      clearInterval(watch);
+      lost();
+    }
+  }, 1000);
+}
+
+$('flip').addEventListener('click', () => {
+  facing = facing === 'user' ? 'environment' : 'user';
+  startCamera();
+});
+$('cams').addEventListener('change', () => startCamera($('cams').value));
+
+peer = new Peer(undefined, peerOptions());
+peer.on('open', () => startCamera());
+peer.on('disconnected', () => peer.reconnect());
+peer.on('error', (err) => {
+  if (err.type === 'peer-unavailable') {
+    say("Can't find the sketch. Open it on the main computer first. Retrying...", true);
+    retryTimer = setTimeout(connectToSketch, 2500);
+  } else {
+    say('Connection problem: ' + err.type, true);
+  }
+});
+$('code').textContent = 'pairing code ' + PAIRING_CODE;
+
+// keep the screen from going to sleep while streaming
+if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {});
+});
+    </script>
+  </body>
+</html>

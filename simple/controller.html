@@ -243,8 +243,16 @@ function render() {
 
 // ---- the link to the laptop (PeerJS: a direct browser-to-browser connection) ----
 
+// Normally the free PeerJS cloud introduces the devices to each other. To use your own PeerJS server instead,
+// add ?peerhost=HOST&peerport=PORT (and &secure=1 for https) to the address.
+function peerOptions() {
+  const q = new URLSearchParams(location.search);
+  const host = q.get('peerhost');
+  return host ? { host, port: Number(q.get('peerport')) || 9000, path: q.get('peerpath') || '/', secure: q.get('secure') === '1' } : {};
+}
+
 function start() {
-  peer = new Peer();
+  peer = new Peer(undefined, peerOptions());
   peer.on('open', () => linkTo());
   peer.on('disconnected', () => peer.reconnect());
   peer.on('error', (err) => {

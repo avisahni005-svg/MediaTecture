@@ -109,6 +109,8 @@ const PREVIEW = 300; // width of the small full-camera preview sent to the iPad 
 let preview;
 let cameras = [];        // [{ id, label }] for the controller's camera list
 let activeCamera = null;
+let localCameras = [];                  // cameras plugged into this computer
+const remoteCams = new Map();           // other devices (phones, tablets...) sending their camera over: peer id -> { stream, call }
 let peer;                // PeerJS connection point; the iPad connects to it using the pairing code
 const links = new Set(); // open connections to controllers (normally just the iPad)
 // Both pages use the same pairing code, so the iPad connects on its own. Put your own code in the web address
@@ -957,7 +959,10 @@ function applyCommand(c) {
       shuffleFeatures();
       break;
     case 'setCamera':
-      if (typeof c.id === 'string' && c.id !== activeCamera) startCamera(c.id);
+      if (typeof c.id === 'string' && c.id !== activeCamera) {
+        if (c.id.startsWith('remote:')) startRemoteCamera(c.id.slice(7));
+        else startCamera(c.id);
+      }
       break;
   }
   publishState();
@@ -968,11 +973,12 @@ function applyCommand(c) {
 // (Re)start the webcam on a specific camera and point face tracking at it.
 // Every camera switch builds a fresh faceMesh model: re-pointing one running model at a new video
 // is unreliable (its loop can die on the old, stopped stream), which left tracking dead on the new camera.
-function startCamera(deviceId) {
+// Switch the picture source. `makeVideo` creates the video; `activeId` is how the controller refers to it.
+function startSource(makeVideo, activeId) {
   const firstStart = !video;
   if (video) {
     faceMesh.detectStop();
-    video.remove(); // also stops the old camera stream
+    video.remove(); // for a local camera this also stops the old camera stream
   }
   faces = [];
   tracks.length = 0; // everyone is re-detected from the new camera
@@ -981,11 +987,9 @@ function startCamera(deviceId) {
   resetBodyModels();
   peopleKey = '';
   clearSmooth();
-  const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
-  if (deviceId) constraints.video.deviceId = { exact: deviceId };
-  const vid = createCapture(constraints, listCameras);
+  const vid = makeVideo();
   video = vid;
-  vid.hide();
+  activeCamera = activeId;
   // The face tracker reports positions in the video element's own width/height, so that must equal the camera's
   // real pixel size. (Forcing the element to 800x800 while the camera sends 1280x720 put every box in the wrong place.)
   vid.elt.addEventListener('loadedmetadata', () => {
@@ -996,7 +1000,7 @@ function startCamera(deviceId) {
   const startTracking = () => {
     if (vid !== video) return; // the user already switched to another camera
     const model = faceMesh;
-    model.detectStart(vid, (results) => {
+    model.detectStart(vid.elt, (results) => {
       if (model === faceMesh) faces = results; // ignore results from an old model
     });
   };
@@ -1007,14 +1011,52 @@ function startCamera(deviceId) {
   }
 }
 
+// a camera plugged into this computer (null = the default one)
+function startCamera(deviceId) {
+  const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
+  if (deviceId) constraints.video.deviceId = { exact: deviceId };
+  startSource(() => {
+    const vid = createCapture(constraints, listCameras);
+    vid.hide();
+    return vid;
+  }, deviceId || null);
+}
+
+// another device's camera, arriving over the network (see camera.html)
+function startRemoteCamera(peerId) {
+  const entry = remoteCams.get(peerId);
+  if (!entry) return;
+  startSource(() => {
+    const el = document.createElement('video');
+    el.muted = true; // we only need the picture
+    el.autoplay = true;
+    el.playsInline = true;
+    el.srcObject = entry.stream;
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    el.play().catch(() => {});
+    // the few bits of a p5 video the rest of the sketch uses
+    return { elt: el, width: 0, height: 0, hide() {}, remove() { el.pause(); el.srcObject = null; el.remove(); } };
+  }, 'remote:' + peerId);
+  publishStatus();
+  publishState();
+}
+
 // Collect every connected camera for the controller's list. Names only appear once camera permission
 // is granted, which is why this runs after the first stream starts.
 async function listCameras() {
   const devices = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === 'videoinput');
   const stream = video && video.elt.srcObject;
   const track = stream && stream.getVideoTracks()[0];
-  activeCamera = track ? track.getSettings().deviceId : null;
-  cameras = devices.map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+  if (!String(activeCamera || '').startsWith('remote:')) activeCamera = track ? track.getSettings().deviceId : null;
+  localCameras = devices.map((d, i) => ({ id: d.deviceId, label: d.label || `Camera ${i + 1}` }));
+  refreshCameraList();
+}
+
+// the controller's camera list: this computer's cameras, then any other devices that are sending their camera
+function refreshCameraList() {
+  const remote = [...remoteCams.keys()].map((id, i) => ({ id: 'remote:' + id, label: `Remote device camera ${i + 1}` }));
+  cameras = [...localCameras, ...remote];
   publishStatus();
   publishState();
 }
@@ -1023,6 +1065,14 @@ if (navigator.mediaDevices) {
 }
 
 // ---- talking to the iPad (PeerJS: a direct browser-to-browser link, no server of our own) ----
+
+// Normally the free PeerJS cloud introduces the devices to each other. To use your own PeerJS server instead,
+// add ?peerhost=HOST&peerport=PORT (and &secure=1 for https) to the address.
+function peerOptions() {
+  const q = new URLSearchParams(location.search);
+  const host = q.get('peerhost');
+  return host ? { host, port: Number(q.get('peerport')) || 9000, path: q.get('peerpath') || '/', secure: q.get('secure') === '1' } : {};
+}
 
 function send(msg) {
   for (const c of links) if (c.open) c.send(msg);
@@ -1051,10 +1101,12 @@ function publishState() {
 
 function publishStatus() {
   send({ type: 'status', status: { people: tracks.length, cameras, activeCamera } });
+  // when running inside the desktop app, tell its control window what is connected
+  if (window.appBridge) window.appBridge.emit('status', { controllers: links.size, remoteCameras: remoteCams.size, people: tracks.length, activeCamera });
 }
 
 function connect() {
-  peer = new Peer('faceproj-' + PAIRING_CODE);
+  peer = new Peer('faceproj-' + PAIRING_CODE, peerOptions());
   peer.on('error', (err) => {
     if (err.type === 'unavailable-id') {
       // the code is still held by an older copy of this page (e.g. just refreshed): try again in a moment
@@ -1065,6 +1117,43 @@ function connect() {
     }
   });
   peer.on('disconnected', () => peer.reconnect());
+  // another device (a phone, say) opened camera.html and is sending its camera: use it as the picture
+  peer.on('call', (call) => {
+    call.answer(); // we only receive, we send nothing back
+    const gone = () => {
+      if (!remoteCams.delete(call.peer)) return;
+      try { call.close(); } catch (e) {}
+      if (activeCamera === 'remote:' + call.peer) startCamera(null); // fall back to this computer's camera
+      refreshCameraList();
+    };
+    call.on('stream', (stream) => {
+      if (remoteCams.has(call.peer)) return;
+      remoteCams.set(call.peer, { stream, call });
+      refreshCameraList();
+      startRemoteCamera(call.peer);
+      // A device that vanishes (page closed, phone locked, Wi-Fi lost) doesn't always say goodbye, so also watch
+      // the connection itself and drop the camera once it has been dead for a few seconds.
+      let badSince = 0;
+      const watch = setInterval(() => {
+        if (!remoteCams.has(call.peer)) return clearInterval(watch);
+        const st = call.peerConnection && call.peerConnection.iceConnectionState;
+        if (st === 'failed' || st === 'closed') {
+          clearInterval(watch);
+          gone();
+        } else if (st === 'disconnected') {
+          badSince = badSince || Date.now();
+          if (Date.now() - badSince > 4000) {
+            clearInterval(watch);
+            gone();
+          }
+        } else {
+          badSince = 0;
+        }
+      }, 1000);
+    });
+    call.on('close', gone);
+    call.on('error', gone);
+  });
   peer.on('connection', (conn) => {
     conn.on('open', () => {
       links.add(conn);
@@ -1074,7 +1163,10 @@ function connect() {
     conn.on('data', (m) => {
       if (m && m.type === 'cmd') applyCommand(m.cmd);
     });
-    const gone = () => links.delete(conn);
+    const gone = () => {
+      links.delete(conn);
+      publishStatus();
+    };
     conn.on('close', gone);
     conn.on('error', gone);
   });
