@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'" />
+    <title>Face Projection</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; padding: 18px; background: #0b0b0b; color: #00ff00; font-family: ui-monospace, Menlo, monospace; font-size: 13px; }
+      h1 { margin: 0 0 14px; font-size: 18px; letter-spacing: 3px; }
+      h2 { margin: 22px 0 8px; font-size: 12px; letter-spacing: 2px; opacity: 0.8; border-bottom: 1px solid #0a5a0a; padding-bottom: 4px; }
+      select, input[type=text], button { font: inherit; border-radius: 6px; border: none; }
+      select, input[type=text] { width: 100%; padding: 9px; background: #000; color: #00ff00; border: 2px solid #00ff00; }
+      button { padding: 10px 12px; background: #00ff00; color: #000; cursor: pointer; }
+      button.off { opacity: 0.4; }
+      button.wide { width: 100%; }
+      .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+      .row > * { flex: 1; }
+      .note { margin-top: 6px; opacity: 0.75; line-height: 1.45; }
+      .bad { color: #ff6666; opacity: 1; }
+      label.check { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }
+      .qrs { display: flex; gap: 12px; margin-top: 8px; }
+      .qr { flex: 1; text-align: center; }
+      .qr img { width: 100%; max-width: 200px; background: #fff; padding: 6px; border-radius: 6px; }
+      .code { font-size: 22px; letter-spacing: 3px; text-align: center; padding: 8px; border: 2px solid #00ff00; border-radius: 6px; }
+      .stat { display: flex; justify-content: space-between; padding: 3px 0; }
+      .link { word-break: break-all; font-size: 11px; opacity: 0.8; user-select: all; margin-top: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>FACE PROJECTION</h1>
+
+    <h2>OUTPUT SCREEN</h2>
+    <select id="display"></select>
+    <div class="row">
+      <button id="fullscreen"></button>
+      <button id="reload">Reload output</button>
+    </div>
+    <div class="note">Esc leaves full screen on the output screen. Cmd+F toggles it.</div>
+
+    <h2>MADMAPPER (SYPHON)</h2>
+    <button id="syphon" class="wide"></button>
+    <div class="note" id="syphonNote"></div>
+    <label class="check"><input type="checkbox" id="swapRB" /> Swap red and blue (if colours look wrong in MadMapper)</label>
+    <label class="check"><input type="checkbox" id="flipV" /> Flip vertically (if the picture is upside down in MadMapper)</label>
+
+    <h2>OTHER DEVICES</h2>
+    <div class="code" id="code"></div>
+    <div class="row"><button id="newCode">New code</button><button id="openHere">Open control panel in this app</button></div>
+    <div class="qrs">
+      <div class="qr"><div>CONTROL PANEL</div><img id="qrController" alt="" /><div class="note">Scan on any phone, tablet or computer</div></div>
+      <div class="qr"><div>CAMERA</div><img id="qrCamera" alt="" /><div class="note">Scan on the device you want as the camera</div></div>
+    </div>
+    <div class="link" id="urlController"></div>
+    <div class="link" id="urlCamera"></div>
+
+    <h2>STATUS</h2>
+    <div class="stat"><span>Control panels connected</span><b id="sControllers">0</b></div>
+    <div class="stat"><span>Remote cameras connected</span><b id="sCameras">0</b></div>
+    <div class="stat"><span>People in frame</span><b id="sPeople">0</b></div>
+
+    <h2>ADVANCED</h2>
+    <div class="note">Address of the pages the phone / tablet QR codes open:</div>
+    <div class="row"><input type="text" id="pagesBase" /><button id="savePages" style="flex:0 0 auto">Save</button></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let state = null;
+
+      function render(s) {
+        state = s;
+        const sel = $('display');
+        sel.innerHTML = '';
+        for (const d of s.displays) {
+          const o = document.createElement('option');
+          o.value = d.id;
+          o.textContent = d.label;
+          o.selected = d.current;
+          sel.appendChild(o);
+        }
+        $('fullscreen').textContent = s.settings.fullscreen ? 'Full screen: ON' : 'Full screen: OFF (window)';
+        $('fullscreen').className = s.settings.fullscreen ? '' : 'off';
+
+        const sy = s.syphon;
+        $('syphon').textContent = sy.available ? (s.settings.syphon ? 'Sending to MadMapper: ON' : 'Send to MadMapper: OFF') : 'Syphon needs a Mac';
+        $('syphon').className = 'wide' + (s.settings.syphon ? '' : ' off');
+        $('syphon').disabled = !sy.available;
+        const size = sy.size ? ` (${sy.size.width}x${sy.size.height})` : '';
+        $('syphonNote').className = 'note' + (sy.message.startsWith('Could not') || sy.message.startsWith('Syphon error') ? ' bad' : '');
+        $('syphonNote').textContent = sy.available
+          ? (sy.running ? sy.message + size : sy.message || `Turn this on, then in MadMapper add a Syphon input and pick "${sy.name}". The Syphon picture is the output window, so choose the output screen above first.`)
+          : 'MadMapper on Windows uses Spout instead of Syphon, which this app does not send yet.';
+        $('swapRB').checked = s.settings.swapRB;
+        $('flipV').checked = s.settings.flipV;
+
+        $('code').textContent = s.settings.pairingCode;
+        $('qrController').src = s.qr.controller;
+        $('qrCamera').src = s.qr.camera;
+        $('urlController').textContent = s.urls.controller;
+        $('urlCamera').textContent = s.urls.camera;
+        if (document.activeElement !== $('pagesBase')) $('pagesBase').value = s.settings.pagesBase;
+
+        $('sControllers').textContent = s.bridge.controllers;
+        $('sCameras').textContent = s.bridge.remoteCameras;
+        $('sPeople').textContent = s.bridge.people;
+      }
+
+      $('display').addEventListener('change', () => controlApi.set({ displayId: Number($('display').value) }).then(render));
+      $('fullscreen').addEventListener('click', () => controlApi.set({ fullscreen: !state.settings.fullscreen }).then(render));
+      $('reload').addEventListener('click', () => controlApi.action('reloadOutput').then(render));
+      $('syphon').addEventListener('click', () => controlApi.set({ syphon: !state.settings.syphon }).then(render));
+      $('swapRB').addEventListener('change', () => controlApi.set({ swapRB: $('swapRB').checked }).then(render));
+      $('flipV').addEventListener('change', () => controlApi.set({ flipV: $('flipV').checked }).then(render));
+      $('newCode').addEventListener('click', () => controlApi.action('newCode').then(render));
+      $('openHere').addEventListener('click', () => controlApi.action('openController'));
+      $('savePages').addEventListener('click', () => controlApi.set({ pagesBase: $('pagesBase').value.trim() }).then(render));
+
+      controlApi.onState(render);
+      controlApi.getState().then(render);
+    </script>
+  </body>
+</html>

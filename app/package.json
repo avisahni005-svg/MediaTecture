@@ -1,0 +1,60 @@
+{
+  "name": "face-projection",
+  "version": "1.0.0",
+  "description": "Face projection: put any screen, MadMapper (Syphon), any device as the camera and any device as the control panel to work",
+  "main": "main.js",
+  "author": "Face Projection",
+  "license": "MIT",
+  "scripts": {
+    "prepare:app": "node scripts/prepare.js",
+    "start": "npm run prepare:app && electron .",
+    "dist:mac": "npm run prepare:app && electron-builder --mac --publish never"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "optionalDependencies": {
+    "node-syphon": "1.5.5"
+  },
+  "devDependencies": {
+    "electron": "^33.4.0",
+    "electron-builder": "^25.1.8",
+    "p5": "1.9.4",
+    "peerjs": "1.5.4"
+  },
+  "build": {
+    "appId": "com.faceprojection.app",
+    "productName": "Face Projection",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "ui/**",
+      "renderer/**",
+      "vendor/**",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/node-syphon/**"
+    ],
+    "mac": {
+      "category": "public.app-category.graphics-design",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "identity": null,
+      "extendInfo": {
+        "NSCameraUsageDescription": "Face Projection uses the camera to find faces and bodies."
+      },
+      "artifactName": "Face-Projection-${version}-${arch}.${ext}"
+    }
+  }
+}

@@ -1,0 +1,46 @@
+# Builds the Face Projection Mac app and puts the download on the repository's Releases page.
+# Run it from the Actions tab: "Build Mac app" > "Run workflow".
+name: Build Mac app
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['app-v*']
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install
+        working-directory: app
+        run: npm install --no-audit --no-fund
+
+      - name: Build the app
+        working-directory: app
+        run: npm run dist:mac
+
+      - name: Keep the files with this run too
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-projection-mac
+          path: app/dist/*.dmg
+
+      - name: Publish the download
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete app-latest --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create app-latest app/dist/*.dmg \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Face Projection app (latest build)" \
+            --notes "Mac app. Apple Silicon Macs (M1, M2, M3, M4): download the file ending in -arm64.dmg. Older Intel Macs: the one ending in -x64.dmg. First time opening it: right-click the app, choose Open, then Open again."
