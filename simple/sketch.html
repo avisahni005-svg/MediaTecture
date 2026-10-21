@@ -117,6 +117,7 @@ const links = new Set(); // open connections to controllers (normally just the i
 // (sketch.html#MYCODE on the laptop, controller.html#MYCODE on the iPad) to keep other people out.
 const DEFAULT_CODE = 'FP-X7K2Q9M4';
 const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
+const DISPLAY_LABEL = PAIRING_CODE.endsWith('-B') ? 'B' : 'A'; // the app runs a second, separate display under the code with -B on the end
 let lastPreviewAt = 0;
 
 // ---- body trace (mosaic) ----
@@ -576,13 +577,15 @@ function bestGrid(n, W, H) {
 
 // Only while the iPad is connected, about 10 times a second: draw the small preview and send it over as a JPEG.
 function maybeSendPreview(vw, vh, boxes) {
-  if (links.size === 0 || millis() - lastPreviewAt < 100) return;
+  // only controllers that are currently showing this display want the picture (a controller tells us when it switches away)
+  const viewers = [...links].filter((c) => c.viewing !== false);
+  if (viewers.length === 0 || millis() - lastPreviewAt < 100) return;
   lastPreviewAt = millis();
   const ph = Math.round((PREVIEW * vh) / vw);
   if (preview.width !== PREVIEW || preview.height !== ph) preview.resizeCanvas(PREVIEW, ph);
   drawPreview(vw, vh, boxes, ph);
   const img = preview.elt.toDataURL('image/jpeg', 0.6);
-  for (const c of links) {
+  for (const c of viewers) {
     const backedUp = c.dataChannel && c.dataChannel.bufferedAmount > 200000; // skip frames if the link is behind
     if (c.open && !backedUp) c.send({ type: 'frame', img });
   }
@@ -1102,6 +1105,7 @@ function publishState() {
       bodyLoading: bodyTrace && !bodySegReady,
       loading: [bodyTrace && !bodySegReady ? 'outline' : null, wantModels.has('pose') && !MODELS.pose.ready ? 'pose' : null, wantModels.has('hands') && !MODELS.hands.ready ? 'hands' : null].filter(Boolean),
       tileSize,
+      display: DISPLAY_LABEL,
       showLabels,
       fxIn,
       fxOut,
@@ -1171,7 +1175,12 @@ function connect() {
       publishStatus();
     });
     conn.on('data', (m) => {
-      if (m && m.type === 'cmd') applyCommand(m.cmd);
+      if (!m || m.type !== 'cmd') return;
+      if (m.cmd && m.cmd.name === 'viewing') {
+        conn.viewing = !!m.cmd.on; // a control panel with several displays shows one at a time
+        return;
+      }
+      applyCommand(m.cmd);
     });
     const gone = () => {
       links.delete(conn);

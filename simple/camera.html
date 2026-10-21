@@ -39,7 +39,9 @@ const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
 const $ = (id) => document.getElementById(id);
 let stream = null;
 let peer = null;
-let call = null;
+// The app can show two separate displays (A and B). This camera feeds every display that is open.
+const SUFFIXES = ['', '-B'];
+const calls = {}; // suffix -> the connection carrying our picture to that display
 let facing = 'environment'; // start on the back camera, which is usually the one you want
 let retryTimer = null;
 
@@ -72,8 +74,8 @@ async function startCamera(deviceId) {
 
   const track = stream.getVideoTracks()[0];
   try { track.contentHint = 'detail'; } catch (e) {} // tell the browser sharpness matters more than smoothness
-  const sender = call && call.peerConnection && call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
-  if (sender) sender.replaceTrack(track); // already streaming: swap the picture without reconnecting
+  const senders = videoSenders();
+  if (senders.length) senders.forEach((s) => s.replaceTrack(track)); // already streaming: swap the picture without reconnecting
   else connectToSketch();
 }
 
@@ -92,46 +94,75 @@ async function fillCameraList() {
 
 // Face tracking needs a sharp picture. By default the connection quietly lowers the resolution when the network
 // is busy; ask it to lower the frame rate instead, and allow a higher quality.
-let tuned = null;
+const tuned = new Set();
 function tuneSender() {
-  const sender = call && call.peerConnection && call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
-  if (!sender || tuned === sender) return;
-  tuned = sender;
-  try {
-    const params = sender.getParameters();
-    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
-    params.degradationPreference = 'maintain-resolution';
-    params.encodings[0].maxBitrate = 6000000;
-    sender.setParameters(params).catch(() => {});
-  } catch (e) {}
+  for (const sender of videoSenders()) {
+    if (tuned.has(sender)) continue;
+    tuned.add(sender);
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+      params.degradationPreference = 'maintain-resolution';
+      params.encodings[0].maxBitrate = 6000000;
+      sender.setParameters(params).catch(() => {});
+    } catch (e) {}
+  }
+}
+
+function videoSenders() {
+  const out = [];
+  for (const call of Object.values(calls)) {
+    const s = call.peerConnection && call.peerConnection.getSenders().find((x) => x.track && x.track.kind === 'video');
+    if (s) out.push(s);
+  }
+  return out;
 }
 
 function connectToSketch() {
   clearTimeout(retryTimer);
   if (!peer || !peer.open || !stream) return;
-  say('Looking for the sketch...');
-  call = peer.call('faceproj-' + PAIRING_CODE, stream);
-  const lost = () => {
-    if (call) call = null;
-    say('Not connected. Is the sketch open on the main computer? Retrying...', true);
-    retryTimer = setTimeout(connectToSketch, 2500);
-  };
-  call.on('close', lost);
-  call.on('error', lost);
-  // the sketch answers without sending anything back, so watch the connection itself
-  const watch = setInterval(() => {
-    if (!call) return clearInterval(watch);
-    const st = call.peerConnection && call.peerConnection.iceConnectionState;
-    if (st === 'connected' || st === 'completed') {
-      say('Streaming this camera to the sketch');
-      tuneSender();
-    }
-    if (st === 'failed' || st === 'closed') {
-      clearInterval(watch);
-      lost();
-    }
-  }, 1000);
+  for (const suffix of SUFFIXES) {
+    if (calls[suffix]) continue; // already connected to that display
+    const call = peer.call('faceproj-' + PAIRING_CODE + suffix, stream);
+    calls[suffix] = call;
+    const lost = () => {
+      if (calls[suffix] === call) delete calls[suffix];
+      showStatus();
+    };
+    call.on('close', lost);
+    call.on('error', lost);
+  }
+  showStatus();
+  // keep looking, so a display that is opened later (or restarted) gets this camera too
+  retryTimer = setTimeout(connectToSketch, 4000);
 }
+
+// how many displays are actually receiving this camera
+function connectedCount() {
+  return Object.values(calls).filter((call) => {
+    const st = call.peerConnection && call.peerConnection.iceConnectionState;
+    return st === 'connected' || st === 'completed';
+  }).length;
+}
+
+function showStatus() {
+  const n = connectedCount();
+  if (n > 0) {
+    say(n === 1 ? 'Streaming this camera to the sketch' : `Streaming this camera to ${n} displays`);
+    tuneSender();
+  } else {
+    say('Looking for the sketch... Open it on the main computer first.', Object.keys(calls).length === 0);
+  }
+}
+
+setInterval(() => {
+  // drop connections that failed, so the next attempt makes a fresh one
+  for (const [suffix, call] of Object.entries(calls)) {
+    const st = call.peerConnection && call.peerConnection.iceConnectionState;
+    if (st === 'failed' || st === 'closed') delete calls[suffix];
+  }
+  if (stream) showStatus();
+}, 1000);
 
 $('flip').addEventListener('click', () => {
   facing = facing === 'user' ? 'environment' : 'user';
@@ -144,8 +175,13 @@ peer.on('open', () => startCamera());
 peer.on('disconnected', () => peer.reconnect());
 peer.on('error', (err) => {
   if (err.type === 'peer-unavailable') {
-    say("Can't find the sketch. Open it on the main computer first. Retrying...", true);
-    retryTimer = setTimeout(connectToSketch, 2500);
+    // that display is not open (normal for display B when it is switched off): forget the attempt, the retry loop tries again
+    const suffix = /-B\s*$/.test(err.message || '') ? '-B' : '';
+    if (calls[suffix]) {
+      try { calls[suffix].close(); } catch (e) {}
+      delete calls[suffix];
+    }
+    showStatus();
   } else {
     say('Connection problem: ' + err.type, true);
   }

@@ -11,12 +11,14 @@
       /* everything is sized to the screen: one grid that is exactly as tall as the window, nothing scrolls */
       main {
         height: 100vh; height: 100dvh; box-sizing: border-box; padding: 10px; gap: 8px;
-        display: grid; grid-template-rows: auto minmax(0, 1fr);
+        display: grid; grid-template-rows: auto auto minmax(0, 1fr);
         font-size: clamp(11px, 2.1vmin, 20px);
       }
       .info { color: #00ff00; font-family: monospace; font-size: 0.8em; text-align: center; }
       .info.bad { color: #ff5555; }
-      .layout { display: grid; grid-template-columns: 1fr 1.8fr 1fr; gap: 10px; min-height: 0; }
+      .tabs { grid-row: 2; display: none; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .tab { padding: 0.55em 6px; }
+      .layout { grid-row: 3; display: grid; grid-template-columns: 1fr 1.8fr 1fr; gap: 10px; min-height: 0; }
       .subcols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; min-height: 0; }
       .col { display: flex; flex-direction: column; gap: 8px; min-height: 0; min-width: 0; }
       .btn, select {
@@ -69,17 +71,30 @@ const MIN_TILE = 14; // mosaic tile size range, same as the sketch
 const MAX_TILE = 120;
 
 let peer;         // our end of the PeerJS link
-let conn;         // the link to the sketch on the laptop
 // Same pairing code as the sketch page, so the connection happens on its own.
 // To use your own code, put it in both addresses: sketch.html#MYCODE and controller.html#MYCODE.
+// The app can run a second, separate display: it answers to the same code with -B on the end.
 const DEFAULT_CODE = 'FP-X7K2Q9M4';
-const PAIRING_CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
-let previewImg;
-let retryTimer;
-let problem = '';
+let CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
+let which = 'A';
+if (CODE.endsWith('-B')) {
+  CODE = CODE.slice(0, -2);
+  which = 'B'; // opened with the address of display B: start on it
+}
+const idOf = (key) => 'faceproj-' + CODE + (key === 'B' ? '-B' : '');
+// everything we know about each display
+const rec = {
+  A: { conn: null, linked: false, state: null, status: { people: 0, cameras: [], activeCamera: null }, problem: '', timer: null, seen: false },
+  B: { conn: null, linked: false, state: null, status: { people: 0, cameras: [], activeCamera: null }, problem: '', timer: null, seen: false },
+};
+// The rest of the page reads these. They always describe the display being shown (see sync()).
+let conn;
 let linked = false;
-let state = null; // what the sketch last reported
+let problem = '';
+let state = null;
 let sketchStatus = { people: 0, cameras: [], activeCamera: null };
+let previewImg, tabBtns, tabs;
+const BLANK = 'data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==';
 
 let screenBtn, tileLabel, tileSlider, bodyBtn, infoLine, camSelect, shuffleBtn, fullBtn, labelsBtn, sizeLabel, sizeSlider, zoomLabel, zoomSlider;
 const featBtns = [];
@@ -92,11 +107,17 @@ function setup() {
   const root = select('main');
 
   infoLine = createDiv('Connecting...').class('info').parent(root);
+  tabs = createDiv().class('tabs').parent(root);
+  tabBtns = ['A', 'B'].map((k) => {
+    const b = createButton(`Display ${k}`).class('btn tab').parent(tabs);
+    tap(b, () => showDisplay(k));
+    return b;
+  });
   const layout = createDiv().class('layout').parent(root);
 
   // column 1: camera preview, camera choice, shuffle, randomize
   const left = createDiv().class('col').parent(layout);
-  previewImg = createImg('data:image/gif;base64,R0lGODlhAQABAAAAACH5BAEKAAEALAAAAAABAAEAAAICTAEAOw==', 'camera preview').class('preview').parent(left);
+  previewImg = createImg(BLANK, 'camera preview').class('preview').parent(left);
   camSelect = createSelect().parent(left);
   camSelect.changed(() => send({ name: 'setCamera', id: camSelect.value() }));
   shuffleBtn = createButton('Shuffle Features').class('btn').parent(left);
@@ -194,18 +215,51 @@ function holdWhileDragging(slider, name) {
   window.addEventListener('pointercancel', up);
 }
 
+// point the variables above at the display being shown
+function sync() {
+  const r = rec[which];
+  conn = r.conn;
+  linked = r.linked;
+  problem = r.problem;
+  state = r.state;
+  sketchStatus = r.status;
+}
+
 function send(cmd) {
-  if (conn && conn.open) conn.send({ type: 'cmd', cmd });
+  const c = rec[which].conn;
+  if (c && c.open) c.send({ type: 'cmd', cmd });
+}
+
+// show another display: its buttons, sliders and camera preview
+function showDisplay(key) {
+  which = key;
+  for (const k of ['A', 'B']) {
+    const c = rec[k].conn;
+    if (c && c.open) c.send({ type: 'cmd', cmd: { name: 'viewing', on: k === key } }); // only the shown display sends the preview
+  }
+  previewImg.elt.src = BLANK;
+  dragging.clear();
+  cameraListKey = '';
+  render();
 }
 
 // draw everything from the latest state
 function render() {
+  sync();
+  // the tabs only appear once a second display has shown up
+  tabs.style('display', rec.B.seen || which === 'B' ? 'grid' : 'none');
+  ['A', 'B'].forEach((k, i) => {
+    tabBtns[i].html(rec[k].linked ? `Display ${k}` : `Display ${k} (off)`);
+    tabBtns[i].style('opacity', k === which ? '1' : '0.4');
+  });
+
+  const name = rec.B.seen || which === 'B' ? `display ${which}` : 'the sketch';
   if (linked) {
     const loading = state && state.loading && state.loading.length ? ` - loading ${state.loading.join(' + ')} model...` : '';
-    infoLine.html('Connected to the sketch' + loading);
+    infoLine.html(`Connected to ${name}` + loading);
     infoLine.removeClass('bad');
   } else {
-    infoLine.html(problem || 'Connecting to the sketch... (open sketch.html on the laptop)');
+    infoLine.html(problem || `Connecting to ${name}... (open sketch.html on the laptop)`);
     infoLine.addClass('bad');
   }
 
@@ -253,53 +307,62 @@ function peerOptions() {
 
 function start() {
   peer = new Peer(undefined, peerOptions());
-  peer.on('open', () => linkTo());
+  peer.on('open', () => {
+    linkTo('A');
+    linkTo('B');
+  });
   peer.on('disconnected', () => peer.reconnect());
   peer.on('error', (err) => {
     if (err.type === 'peer-unavailable') {
-      problem = "Can't find the sketch. Is sketch.html open on the laptop?";
-      retry();
+      // the message names the display we could not reach
+      const key = /-B\s*$/.test(err.message || '') ? 'B' : 'A';
+      rec[key].problem = key === 'B' ? 'Display B is not open. Turn it on in the app.' : "Can't find the sketch. Is sketch.html open on the laptop?";
+      retry(key);
     } else {
-      problem = 'Connection problem: ' + err.type;
+      rec[which].problem = 'Connection problem: ' + err.type;
     }
     render();
   });
 }
 
-function linkTo() {
+function linkTo(key) {
   if (!peer || !peer.open) return;
-  problem = '';
-  clearTimeout(retryTimer);
-  if (conn) conn.close();
-  conn = peer.connect('faceproj-' + PAIRING_CODE, { reliable: true });
-  conn.on('open', () => {
-    linked = true;
-    problem = '';
+  const r = rec[key];
+  r.problem = '';
+  clearTimeout(r.timer);
+  if (r.conn) r.conn.close();
+  const c = peer.connect(idOf(key), { reliable: true });
+  r.conn = c;
+  c.on('open', () => {
+    r.linked = true;
+    r.seen = true;
+    r.problem = '';
+    c.send({ type: 'cmd', cmd: { name: 'viewing', on: key === which } });
     render();
   });
-  conn.on('data', (m) => {
+  c.on('data', (m) => {
     if (!m) return;
     if (m.type === 'frame') {
-      previewImg.elt.src = m.img; // only the picture changes, no need to redraw the controls
+      if (key === which) previewImg.elt.src = m.img; // only the picture changes, no need to redraw the controls
       return;
     }
-    if (m.type === 'state') state = m.state;
-    if (m.type === 'status') sketchStatus = m.status;
-    render();
+    if (m.type === 'state') r.state = m.state;
+    if (m.type === 'status') r.status = m.status;
+    if (key === which || m.type === 'state') render();
   });
-  conn.on('close', () => {
-    linked = false;
-    problem = 'Lost the connection. Reconnecting...';
-    retry();
+  c.on('close', () => {
+    r.linked = false;
+    r.problem = 'Lost the connection. Reconnecting...';
+    retry(key);
     render();
   });
   render();
 }
 
-// keep trying, e.g. if the laptop page was refreshed
-function retry() {
-  clearTimeout(retryTimer);
-  retryTimer = setTimeout(linkTo, 2500);
+// keep trying, e.g. if the laptop page was refreshed or the second display is switched on later
+function retry(key) {
+  clearTimeout(rec[key].timer);
+  rec[key].timer = setTimeout(() => linkTo(key), key === 'B' && !rec.B.seen ? 4000 : 2500);
 }
     </script>
   </body>
