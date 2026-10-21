@@ -70,7 +70,7 @@ const MAX_PEOPLE = 4;        // how many faces are tracked at once
 const GRACE_MS = 800;        // a person who drops out of detection for this long counts as gone
 const NEWCOMER_MS = 400;     // a newcomer who vanishes this fast was probably a false detection
 const CONFIRM_HITS = 5;      // a new face must show up in this many detections before it counts as a person
-const SMOOTHING = 0.35;      // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
+const SMOOTHING = 0.55;      // 0..1, higher = follows faster; smoothing keeps the zoomed image steady
 const MODES = ['none', 'mono', 'duo'];
 
 // ---- what the controller changes ----
@@ -176,7 +176,8 @@ function draw() {
   const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
 
   // the pose and hand models only run for Body Trace, where they make the outline follow arms, legs and fingers
-  wantModels = new Set(bodyTrace ? ['pose', 'hands'] : []);
+  // (and the pose model also helps find people who are too far away for the face model: it sees the whole body)
+  wantModels = new Set(bodyTrace ? ['pose', 'hands'] : candidates.length === 0 ? ['pose'] : []);
   syncModels();
   runFaceDetect();
 
@@ -698,7 +699,7 @@ function runModelOnCrop(kind) {
   const vw = video.elt.videoWidth;
   const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
-  const r = segRect || { sx: 0, sy: 0, sw: vw, sh: vh };
+  const r = (bodyTrace && segRect) || { sx: 0, sy: 0, sw: vw, sh: vh };
   const w = MODEL_SIZE[kind];
   const h = Math.max(16, Math.round((w * r.sh) / r.sw));
   if (!modelCanvas[kind]) modelCanvas[kind] = document.createElement('canvas');
@@ -1082,6 +1083,13 @@ function faceCropRect(vw, vh) {
   const m = Math.min(vw, vh);
   const n = faceRun.n++;
   if (candidates.length === 0) {
+    // the pose model sees whole bodies from much further away than the face model sees faces: look where it found a head
+    const heads = MODELS.pose.results.map(headFromPose).filter(Boolean);
+    if (heads.length && n % 3 !== 0) {
+      const h = heads[n % heads.length];
+      const side = Math.min(h.side, m);
+      return { sx: constrain(h.cx - side / 2, 0, vw - side), sy: constrain(h.cy - side / 2, 0, vh - side), sw: side, sh: side };
+    }
     const v = FACE_SWEEP[n % FACE_SWEEP.length];
     if (!v) return whole;
     const side = v[2] * m;
@@ -1097,6 +1105,21 @@ function faceCropRect(vw, vh) {
   const side = Math.max(Math.max(x1 - x0, y1 - y0) + 5 * big, 160);
   if (side >= 0.8 * m) return whole;
   return { sx: constrain((x0 + x1) / 2 - side / 2, 0, vw - side), sy: constrain((y0 + y1) / 2 - side / 2, 0, vh - side), sw: side, sh: side };
+}
+
+// where a person's head is, from a pose result: { cx, cy, side } = a square that comfortably holds the head (or null)
+function headFromPose(pose) {
+  const k = {};
+  for (const p of pose.keypoints || []) k[p.name] = p;
+  const ok = (name) => k[name] && k[name].confidence >= 0.2;
+  const pts = ['nose', 'left_eye', 'right_eye', 'left_ear', 'right_ear'].filter(ok).map((name) => k[name]);
+  if (!pts.length) return null;
+  const cx = pts.reduce((a, p) => a + p.x, 0) / pts.length;
+  const cy = pts.reduce((a, p) => a + p.y, 0) / pts.length;
+  let face = 80; // head height in pixels: about 3 eye-widths, or half the shoulder width
+  if (ok('left_eye') && ok('right_eye')) face = 3 * dist(k.left_eye.x, k.left_eye.y, k.right_eye.x, k.right_eye.y);
+  else if (ok('left_shoulder') && ok('right_shoulder')) face = 0.5 * dist(k.left_shoulder.x, k.left_shoulder.y, k.right_shoulder.x, k.right_shoulder.y);
+  return { cx, cy, side: Math.max(160, face * 3.2) };
 }
 
 // copy a detection result with every position and size turned from crop pixels back into whole-picture pixels
