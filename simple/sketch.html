@@ -92,8 +92,8 @@ const tracks = []; // the people we trust (seen in several detections in a row):
 let lastFaces = null;  // the detection result we last processed, so each result is only counted once
 // the two optional body models (loaded and run only while Body Trace is on)
 const MODELS = {
-  pose:  { model: null, ready: false, running: false, busy: false, gen: 0, results: [], version: 0 }, // where the arms and legs are
-  hands: { model: null, ready: false, running: false, busy: false, gen: 0, results: [], version: 0 }, // where the hands and fingers are
+  pose:  { model: null, ready: false, running: false, busy: false, last: 0, gen: 0, results: [], version: 0 }, // where the arms and legs are
+  hands: { model: null, ready: false, running: false, busy: false, last: 0, gen: 0, results: [], version: 0 }, // where the hands and fingers are
 };
 let seenVersion = { pose: 0, hands: 0 }; // which model result each person was last matched against
 let wantModels = new Set();               // which extra models are needed right now (Body Trace only)
@@ -124,15 +124,19 @@ let lastPreviewAt = 0;
 const MIN_TILE = 14;     // smallest / largest mosaic tile, in "800 pixel screen" units like the box sizes
 const MAX_TILE = 120;
 let tileSize = 28;       // current mosaic tile size (the controller's Tile Size slider)
-const SEG_SIZE = 512;    // the body model looks at a copy of the picture this many pixels wide (a zoomed-in crop when you are small in frame)
+const SEG_SIZE = 288;    // the body model looks at a copy of the picture this many pixels wide (a zoomed-in crop when you are small in frame)
 let bodySeg = null;      // ml5 body segmentation model, only loaded the first time Body Trace is switched on
 let bodySegReady = false;
 let bodySegRunning = false;
+let bodySegBusy = false;
+let bodySegLast = 0;
 let segCanvas = null;    // the small picture the body model looks at
 let latestMask = null;   // newest silhouette: ImageData in the camera's own (unmirrored) orientation
 let maskRect = null;     // which part of the camera picture that silhouette covers: { sx, sy, sw, sh }
 let modelCanvas = { pose: null, hands: null }; // zoomed-in copies of the picture for the pose and hand models
-const MODEL_SIZE = { pose: 448, hands: 640 };  // how many pixels wide each of those copies is
+const MODEL_SIZE = { pose: 320, hands: 384 };  // how many pixels wide each of those copies is (the models shrink their input anyway)
+const MODEL_GAP = { pose: 70, hands: 160 };    // at least this many milliseconds between two runs of each model, so the face tracker keeps its share of the computer
+const SEG_GAP = 50;
 let segRect = null;      // the part of the camera picture currently being fed to the body model (eased, so it doesn't jump)
 let maskPersonOpaque = true; // which way round the mask is: is the person the opaque part? (worked out live)
 let mosaicCells = [];    // one remembered random choice per tile: { fi: feature index, pid: person id }
@@ -174,6 +178,7 @@ function draw() {
   // the pose and hand models only run for Body Trace, where they make the outline follow arms, legs and fingers
   wantModels = new Set(bodyTrace ? ['pose', 'hands'] : []);
   syncModels();
+  runFaceDetect();
 
   updatePeople();
 
@@ -270,7 +275,6 @@ function setBodyTrace(on) {
   bodyTrace = on;
   if (on) screenTrace = false; // one mosaic mode at a time
   if (!on) {
-    if (bodySegRunning) bodySeg.detectStop();
     bodySegRunning = false;
     return;
   }
@@ -305,12 +309,17 @@ function feedBodyModel(vw, vh) {
     segCanvas.height = h;
   }
   segCanvas.getContext('2d').drawImage(video.elt, segRect.sx, segRect.sy, segRect.sw, segRect.sh, 0, 0, w, h);
-  if (bodySegReady && !bodySegRunning) {
+  if (bodySegReady && !bodySegBusy && millis() - bodySegLast >= SEG_GAP) {
     bodySegRunning = true;
-    bodySeg.detectStart(segCanvas, (result) => {
+    bodySegBusy = true;
+    bodySegLast = millis();
+    const sent = { ...segRect }; // the part of the picture this answer will describe
+    const done = (result) => {
+      bodySegBusy = false;
+      if (!bodyTrace) return;
       if (result && result.maskImageData) {
         const fresh = result.maskImageData;
-        const rect = { ...segRect }; // the part of the picture this silhouette covers
+        const rect = sent;
         // blend with the previous silhouette (when it covers about the same area) so the edge stops flickering
         const old = latestMask;
         const same = old && maskRect && old.width === fresh.width && old.height === fresh.height
@@ -320,7 +329,9 @@ function feedBodyModel(vw, vh) {
         latestMask = fresh;
         maskRect = rect;
       }
-    });
+    };
+    const pr = bodySeg.detect(segCanvas, done);
+    if (pr && typeof pr.catch === 'function') pr.catch(() => (bodySegBusy = false));
   }
 }
 
@@ -682,9 +693,10 @@ function ensureModel(kind) {
 // the whole picture, so a small or far away person fills more of what the model sees. One detection at a time.
 function runModelOnCrop(kind) {
   const m = MODELS[kind];
-  if (m.busy || typeof m.model.detect !== 'function') return;
-  const vw = video.elt.videoWidth || video.width;
-  const vh = video.elt.videoHeight || video.height;
+  if (m.busy || typeof m.model.detect !== 'function' || millis() - m.last < MODEL_GAP[kind]) return;
+  m.last = millis();
+  const vw = video.elt.videoWidth;
+  const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
   const r = segRect || { sx: 0, sy: 0, sw: vw, sh: vh };
   const w = MODEL_SIZE[kind];
@@ -1021,7 +1033,8 @@ function applyCommand(c) {
 function startSource(makeVideo, activeId) {
   const firstStart = !video;
   if (video) {
-    faceMesh.detectStop();
+    faceRun.model = null; // stop looking until the new camera's model is ready
+    faceRun.gen++;
     video.remove(); // for a local camera this also stops the old camera stream
   }
   faces = [];
@@ -1043,10 +1056,11 @@ function startSource(makeVideo, activeId) {
 
   const startTracking = () => {
     if (vid !== video) return; // the user already switched to another camera
-    const model = faceMesh;
-    model.detectStart(vid.elt, (results) => {
-      if (model === faceMesh) faces = results; // ignore results from an old model
-    });
+    // we hand the model a different crop each time, so it must not assume this picture follows the last one
+    faceMesh.runtimeConfig = { ...faceMesh.runtimeConfig, staticImageMode: true };
+    faceRun.model = faceMesh;
+    faceRun.gen++;
+    faceRun.busy = false;
   };
   if (firstStart) {
     startTracking(); // the model loaded in preload()
@@ -1056,6 +1070,82 @@ function startSource(makeVideo, activeId) {
 }
 
 // make the video element's width/height equal the picture's real size (the face tracker measures against it)
+// ---- face finding on zoomed-in crops ----
+// A face far from the camera is only a few pixels wide in the whole picture, which the face model misses. So the face
+// model looks at a crop around the people it already knows (they fill more of what it sees), and when nobody is found
+// yet it sweeps through zoomed-in views of the picture. Every few runs it looks at everything, to spot newcomers.
+const faceRun = { model: null, busy: false, gen: 0, n: 0, canvas: null };
+const FACE_SWEEP = [null, [0.5, 0.5, 0.6], [0.25, 0.5, 0.5], [0.75, 0.5, 0.5], [0.5, 0.5, 0.3], [0.5, 0.35, 0.3]]; // [center x, center y, side] as fractions of the picture; null = all of it
+
+function faceCropRect(vw, vh) {
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+  const m = Math.min(vw, vh);
+  const n = faceRun.n++;
+  if (candidates.length === 0) {
+    const v = FACE_SWEEP[n % FACE_SWEEP.length];
+    if (!v) return whole;
+    const side = v[2] * m;
+    return { sx: constrain(v[0] * vw - side / 2, 0, vw - side), sy: constrain(v[1] * vh - side / 2, 0, vh - side), sw: side, sh: side };
+  }
+  if (n % 5 === 0) return whole;
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, big = 0;
+  for (const t of candidates) {
+    const b = faceBox(t.face);
+    x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
+    big = Math.max(big, b.w, b.h);
+  }
+  const side = Math.max(Math.max(x1 - x0, y1 - y0) + 5 * big, 160);
+  if (side >= 0.8 * m) return whole;
+  return { sx: constrain((x0 + x1) / 2 - side / 2, 0, vw - side), sy: constrain((y0 + y1) / 2 - side / 2, 0, vh - side), sw: side, sh: side };
+}
+
+// copy a detection result with every position and size turned from crop pixels back into whole-picture pixels
+function mapToFrame(o, r, kx, ky) {
+  if (Array.isArray(o)) return o.map((v) => mapToFrame(v, r, kx, ky));
+  if (!o || typeof o !== 'object') return o;
+  const out = {};
+  for (const k in o) {
+    const v = o[k];
+    if (v && typeof v === 'object') out[k] = mapToFrame(v, r, kx, ky);
+    else if (typeof v !== 'number') out[k] = v;
+    else if (k === 'x' || k === 'xMin' || k === 'xMax' || k === 'centerX') out[k] = r.sx + v * kx;
+    else if (k === 'y' || k === 'yMin' || k === 'yMax' || k === 'centerY') out[k] = r.sy + v * ky;
+    else if (k === 'width') out[k] = v * kx;
+    else if (k === 'height') out[k] = v * ky;
+    else out[k] = v;
+  }
+  return out;
+}
+
+// start one face detection if the last one is done
+function runFaceDetect() {
+  const model = faceRun.model;
+  if (!model || faceRun.busy || !video || typeof model.detect !== 'function') return;
+  const vw = video.elt.videoWidth; // 0 until the camera picture really arrives
+  const vh = video.elt.videoHeight;
+  if (!vw || !vh) return;
+  const r = faceCropRect(vw, vh);
+  const w = r.sw === vw ? 640 : 320;
+  const h = Math.max(16, Math.round((w * r.sh) / r.sw));
+  if (!faceRun.canvas) faceRun.canvas = document.createElement('canvas');
+  const cv = faceRun.canvas;
+  if (cv.width !== w || cv.height !== h) {
+    cv.width = w;
+    cv.height = h;
+  }
+  cv.getContext('2d').drawImage(video.elt, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
+  faceRun.busy = true;
+  const gen = faceRun.gen;
+  const kx = r.sw / w;
+  const ky = r.sh / h;
+  const p = model.detect(cv, (results) => {
+    faceRun.busy = false;
+    if (gen !== faceRun.gen) return; // from before a camera switch
+    faces = mapToFrame(results || [], r, kx, ky);
+  });
+  if (p && typeof p.catch === 'function') p.catch(() => (faceRun.busy = false));
+}
+
 function syncVideoSize() {
   const el = video && video.elt;
   if (el && el.videoWidth && (el.width !== el.videoWidth || el.height !== el.videoHeight)) {
