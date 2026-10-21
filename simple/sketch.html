@@ -92,8 +92,8 @@ const tracks = []; // the people we trust (seen in several detections in a row):
 let lastFaces = null;  // the detection result we last processed, so each result is only counted once
 // the two optional body models (loaded and run only while Body Trace is on)
 const MODELS = {
-  pose:  { model: null, ready: false, running: false, results: [], version: 0 }, // where the arms and legs are
-  hands: { model: null, ready: false, running: false, results: [], version: 0 }, // where the hands and fingers are
+  pose:  { model: null, ready: false, running: false, busy: false, gen: 0, results: [], version: 0 }, // where the arms and legs are
+  hands: { model: null, ready: false, running: false, busy: false, gen: 0, results: [], version: 0 }, // where the hands and fingers are
 };
 let seenVersion = { pose: 0, hands: 0 }; // which model result each person was last matched against
 let wantModels = new Set();               // which extra models are needed right now (Body Trace only)
@@ -124,13 +124,15 @@ let lastPreviewAt = 0;
 const MIN_TILE = 14;     // smallest / largest mosaic tile, in "800 pixel screen" units like the box sizes
 const MAX_TILE = 120;
 let tileSize = 28;       // current mosaic tile size (the controller's Tile Size slider)
-const SEG_SIZE = 320;    // the body model looks at a copy of the picture this many pixels wide (a zoomed-in crop when you are small in frame)
+const SEG_SIZE = 512;    // the body model looks at a copy of the picture this many pixels wide (a zoomed-in crop when you are small in frame)
 let bodySeg = null;      // ml5 body segmentation model, only loaded the first time Body Trace is switched on
 let bodySegReady = false;
 let bodySegRunning = false;
 let segCanvas = null;    // the small picture the body model looks at
 let latestMask = null;   // newest silhouette: ImageData in the camera's own (unmirrored) orientation
 let maskRect = null;     // which part of the camera picture that silhouette covers: { sx, sy, sw, sh }
+let modelCanvas = { pose: null, hands: null }; // zoomed-in copies of the picture for the pose and hand models
+const MODEL_SIZE = { pose: 448, hands: 640 };  // how many pixels wide each of those copies is
 let segRect = null;      // the part of the camera picture currently being fed to the body model (eased, so it doesn't jump)
 let maskPersonOpaque = true; // which way round the mask is: is the person the opaque part? (worked out live)
 let mosaicCells = [];    // one remembered random choice per tile: { fi: feature index, pid: person id }
@@ -307,8 +309,16 @@ function feedBodyModel(vw, vh) {
     bodySegRunning = true;
     bodySeg.detectStart(segCanvas, (result) => {
       if (result && result.maskImageData) {
-        latestMask = result.maskImageData;
-        maskRect = { ...segRect }; // the part of the picture this silhouette covers
+        const fresh = result.maskImageData;
+        const rect = { ...segRect }; // the part of the picture this silhouette covers
+        // blend with the previous silhouette (when it covers about the same area) so the edge stops flickering
+        const old = latestMask;
+        const same = old && maskRect && old.width === fresh.width && old.height === fresh.height
+          && Math.abs(maskRect.sx - rect.sx) < 0.03 * rect.sw && Math.abs(maskRect.sw - rect.sw) < 0.03 * rect.sw
+          && Math.abs(maskRect.sy - rect.sy) < 0.03 * rect.sh;
+        if (same) for (let i = 3; i < fresh.data.length; i += 4) fresh.data[i] = 0.6 * fresh.data[i] + 0.4 * old.data[i];
+        latestMask = fresh;
+        maskRect = rect;
       }
     });
   }
@@ -341,7 +351,7 @@ function bodyCropRect(vw, vh) {
       grow(b.x + b.w / 2 + 3.5 * b.w, b.y + 8 * b.h);
     }
   }
-  const pad = 0.1 * Math.max(x1 - x0, y1 - y0);
+  const pad = 0.18 * Math.max(x1 - x0, y1 - y0); // room for a limb to swing out before the next update
   x0 = Math.max(0, x0 - pad); y0 = Math.max(0, y0 - pad); x1 = Math.min(vw, x1 + pad); y1 = Math.min(vh, y1 + pad);
   const side = Math.max(x1 - x0, y1 - y0);
   if (side >= 0.98 * Math.min(vw, vh)) return whole; // the people fill the picture anyway
@@ -668,21 +678,52 @@ function ensureModel(kind) {
     : ml5.handPose({ maxHands: 6, modelType: 'lite' }, loaded);
 }
 
+// Run a pose or hand model on the zoomed-in crop around the people (the same one the outline model uses) instead of
+// the whole picture, so a small or far away person fills more of what the model sees. One detection at a time.
+function runModelOnCrop(kind) {
+  const m = MODELS[kind];
+  if (m.busy || typeof m.model.detect !== 'function') return;
+  const vw = video.elt.videoWidth || video.width;
+  const vh = video.elt.videoHeight || video.height;
+  if (!vw || !vh) return;
+  const r = segRect || { sx: 0, sy: 0, sw: vw, sh: vh };
+  const w = MODEL_SIZE[kind];
+  const h = Math.max(16, Math.round((w * r.sh) / r.sw));
+  if (!modelCanvas[kind]) modelCanvas[kind] = document.createElement('canvas');
+  const cv = modelCanvas[kind];
+  if (cv.width !== w || cv.height !== h) {
+    cv.width = w;
+    cv.height = h;
+  }
+  cv.getContext('2d').drawImage(video.elt, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
+  m.busy = true;
+  const gen = m.gen; // a camera change in the meantime makes this answer stale
+  const p = m.model.detect(cv, (results) => {
+    m.busy = false;
+    if (gen !== m.gen || !m.running) return;
+    const kx = r.sw / w;
+    const ky = r.sh / h;
+    // put the points back in whole-picture coordinates
+    m.results = (results || []).map((o) => ({ ...o, keypoints: (o.keypoints || []).map((k) => ({ ...k, x: r.sx + k.x * kx, y: r.sy + k.y * ky })) }));
+    m.version++;
+  });
+  // if a detection throws, let the next frame try again instead of getting stuck
+  if (p && typeof p.catch === 'function') p.catch(() => (m.busy = false));
+}
+
 // start the models something needs, stop the ones nothing needs
 function syncModels() {
   for (const kind of ['pose', 'hands']) {
     const m = MODELS[kind];
     if (wantModels.has(kind)) {
       ensureModel(kind);
-      if (m.ready && !m.running && video) {
+      if (m.ready && video) {
         m.running = true;
-        m.model.detectStart(video, (results) => {
-          m.results = results;
-          m.version++;
-        });
+        runModelOnCrop(kind);
       }
     } else if (m.running) {
-      m.model.detectStop();
+      m.gen++;
+      m.busy = false;
       m.running = false;
       m.results = [];
       m.version++;
@@ -694,8 +735,7 @@ function syncModels() {
 function resetBodyModels() {
   for (const kind of ['pose', 'hands']) {
     const m = MODELS[kind];
-    if (m.running) m.model.detectStop();
-    Object.assign(m, { model: null, ready: false, running: false, results: [], version: m.version + 1 });
+    Object.assign(m, { model: null, ready: false, running: false, busy: false, gen: m.gen + 1, results: [], version: m.version + 1 });
   }
   for (const t of candidates) {
     t.pose = null;
