@@ -14,11 +14,16 @@
       button { padding: 10px 12px; background: #00ff00; color: #000; cursor: pointer; }
       button.off { opacity: 0.4; }
       button.wide { width: 100%; }
+      button:disabled { opacity: 0.25; cursor: default; }
       .row { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
       .row > * { flex: 1; }
       .note { margin-top: 6px; opacity: 0.75; line-height: 1.45; }
       .bad { color: #ff6666; opacity: 1; }
       label.check { display: flex; align-items: center; gap: 8px; margin-top: 8px; cursor: pointer; }
+      .card { border: 2px solid #00ff00; border-radius: 10px; padding: 12px; margin-top: 12px; }
+      .card.disabled { border-color: #0a5a0a; }
+      .card h3 { margin: 0 0 8px; font-size: 14px; letter-spacing: 2px; display: flex; justify-content: space-between; align-items: center; }
+      .card h3 button { padding: 6px 10px; }
       .qrs { display: flex; gap: 12px; margin-top: 8px; }
       .qr { flex: 1; text-align: center; }
       .qr img { width: 100%; max-width: 200px; background: #fff; padding: 6px; border-radius: 6px; }
@@ -29,36 +34,24 @@
   </head>
   <body>
     <h1>FACE PROJECTION</h1>
+    <div class="note">Two separate displays. Each has its own screen, camera, controls and MadMapper source. Control both from one panel (it has a tab for each).</div>
 
-    <h2>OUTPUT SCREEN</h2>
-    <select id="display"></select>
-    <div class="row">
-      <button id="fullscreen"></button>
-      <button id="showOutput">Show output window</button>
-    </div>
-    <div class="row"><button id="reload">Reload output</button></div>
-    <div class="note">The output is a normal window: drag it, resize it, or minimize it. Picking a screen above moves it there. Full screen fills that screen (Esc or Cmd+F leaves it).</div>
+    <div id="outputs"></div>
 
-    <h2>MADMAPPER (SYPHON)</h2>
-    <button id="syphon" class="wide"></button>
-    <div class="note" id="syphonNote"></div>
-    <label class="check"><input type="checkbox" id="swapRB" /> Swap red and blue (if colours look wrong in MadMapper)</label>
-    <label class="check"><input type="checkbox" id="flipV" /> Flip vertically (if the picture is upside down in MadMapper)</label>
-
-    <h2>OTHER DEVICES</h2>
+    <h2>CONTROL PANEL AND CAMERAS (ANY DEVICE)</h2>
     <div class="code" id="code"></div>
     <div class="row"><button id="newCode">New code</button><button id="openHere">Open control panel in this app</button></div>
     <div class="qrs">
-      <div class="qr"><div>CONTROL PANEL</div><img id="qrController" alt="" /><div class="note">Scan on any phone, tablet or computer</div></div>
-      <div class="qr"><div>CAMERA</div><img id="qrCamera" alt="" /><div class="note">Scan on the device you want as the camera</div></div>
+      <div class="qr"><div>CONTROL PANEL</div><img id="qrController" alt="" /><div class="note">Scan on any phone, tablet or computer. It has a tab for each display.</div></div>
+      <div class="qr"><div>CAMERA</div><img id="qrCamera" alt="" /><div class="note">Scan on the device you want as the camera. It feeds every open display.</div></div>
     </div>
     <div class="link" id="urlController"></div>
     <div class="link" id="urlCamera"></div>
 
-    <h2>STATUS</h2>
-    <div class="stat"><span>Control panels connected</span><b id="sControllers">0</b></div>
-    <div class="stat"><span>Remote cameras connected</span><b id="sCameras">0</b></div>
-    <div class="stat"><span>People in frame</span><b id="sPeople">0</b></div>
+    <h2>MADMAPPER FIXES</h2>
+    <div class="note">If colours or direction look wrong in MadMapper (applies to both displays):</div>
+    <label class="check"><input type="checkbox" id="swapRB" /> Swap red and blue</label>
+    <label class="check"><input type="checkbox" id="flipV" /> Flip vertically</label>
 
     <h2>ADVANCED</h2>
     <div class="note">Address of the pages the phone / tablet QR codes open:</div>
@@ -68,54 +61,76 @@
       const $ = (id) => document.getElementById(id);
       let state = null;
 
-      function render(s) {
-        state = s;
-        const sel = $('display');
-        sel.innerHTML = '';
-        for (const d of s.displays) {
-          const o = document.createElement('option');
-          o.value = d.id;
-          o.textContent = d.label;
-          o.selected = d.current;
-          sel.appendChild(o);
+      // one card per display, rebuilt from the latest state
+      function renderOutputs(s) {
+        const box = $('outputs');
+        box.innerHTML = '';
+        for (const out of s.outputs) {
+          const o = out.settings;
+          const card = document.createElement('div');
+          card.className = 'card' + (o.enabled ? '' : ' disabled');
+          const sy = out.syphon;
+          const size = sy.size ? ` (${sy.size.width}x${sy.size.height})` : '';
+          const noteBad = sy.message.startsWith('Could not') || sy.message.startsWith('Syphon error');
+          const syphonNote = sy.running
+            ? sy.message + size
+            : sy.message || `In MadMapper add a Syphon input and pick "${sy.name}". It is the picture in this display's window.`;
+          card.innerHTML = `
+            <h3><span>DISPLAY ${out.label}</span><button data-act="enabled">${o.enabled ? 'Running: ON' : 'Running: OFF'}</button></h3>
+            ${o.enabled ? `
+              <select data-act="screen"></select>
+              <div class="row">
+                <button data-act="fullscreen" class="${o.fullscreen ? '' : 'off'}">${o.fullscreen ? 'Full screen: ON' : 'Full screen: OFF'}</button>
+                <button data-act="show">Show window</button>
+                <button data-act="reload">Reload</button>
+              </div>
+              <div class="row"><button class="wide ${o.syphon ? '' : 'off'}" data-act="syphon" ${s.syphonAvailable ? '' : 'disabled'}>${o.syphon ? 'Sending to MadMapper: ON' : 'Send to MadMapper: OFF'}</button></div>
+              <div class="note ${noteBad ? 'bad' : ''}">${syphonNote}</div>
+              <div class="stat"><span>Control panels connected</span><b>${out.bridge.controllers}</b></div>
+              <div class="stat"><span>Remote cameras</span><b>${out.bridge.remoteCameras}</b></div>
+              <div class="stat"><span>People in frame</span><b>${out.bridge.people}</b></div>
+            ` : '<div class="note">Switched off. Turn it on to open a second output window.</div>'}`;
+          const sel = card.querySelector('[data-act=screen]');
+          if (sel) {
+            for (const d of out.displays) {
+              const opt = document.createElement('option');
+              opt.value = d.id;
+              opt.textContent = d.label;
+              opt.selected = d.current;
+              sel.appendChild(opt);
+            }
+            sel.addEventListener('change', () => controlApi.setOutput(out.index, { displayId: Number(sel.value) }).then(render));
+          }
+          const on = (act, fn) => { const el = card.querySelector(`[data-act=${act}]`); if (el) el.addEventListener('click', fn); };
+          on('enabled', () => controlApi.setOutput(out.index, { enabled: !o.enabled }).then(render));
+          on('fullscreen', () => controlApi.setOutput(out.index, { fullscreen: !o.fullscreen }).then(render));
+          on('syphon', () => controlApi.setOutput(out.index, { syphon: !o.syphon }).then(render));
+          on('show', () => controlApi.action('showOutput', out.index).then(render));
+          on('reload', () => controlApi.action('reloadOutput', out.index).then(render));
+          box.appendChild(card);
         }
-        $('fullscreen').textContent = s.settings.fullscreen ? 'Full screen: ON' : 'Full screen: OFF';
-        $('fullscreen').className = s.settings.fullscreen ? '' : 'off';
+      }
 
-        const sy = s.syphon;
-        $('syphon').textContent = s.settings.syphon ? 'Sending to MadMapper: ON' : 'Send to MadMapper: OFF';
-        $('syphon').className = 'wide' + (s.settings.syphon ? '' : ' off');
-        $('syphon').disabled = !sy.available;
-        const size = sy.size ? ` (${sy.size.width}x${sy.size.height})` : '';
-        $('syphonNote').className = 'note' + (sy.message.startsWith('Could not') || sy.message.startsWith('Syphon error') ? ' bad' : '');
-        $('syphonNote').textContent = sy.running
-          ? sy.message + size
-          : sy.message || `Turn this on, then in MadMapper add a Syphon input and pick "${sy.name}". What MadMapper receives is the picture in the output window, at the window's size.`;
-        $('swapRB').checked = s.settings.swapRB;
-        $('flipV').checked = s.settings.flipV;
-
-        $('code').textContent = s.settings.pairingCode;
+      function render(s) {
+        if (!s) return;
+        state = s;
+        // don't rebuild the cards while a dropdown is open
+        if (!(document.activeElement && document.activeElement.tagName === 'SELECT')) renderOutputs(s);
+        $('code').textContent = s.shared.pairingCode;
         $('qrController').src = s.qr.controller;
         $('qrCamera').src = s.qr.camera;
         $('urlController').textContent = s.urls.controller;
         $('urlCamera').textContent = s.urls.camera;
-        if (document.activeElement !== $('pagesBase')) $('pagesBase').value = s.settings.pagesBase;
-
-        $('sControllers').textContent = s.bridge.controllers;
-        $('sCameras').textContent = s.bridge.remoteCameras;
-        $('sPeople').textContent = s.bridge.people;
+        $('swapRB').checked = s.shared.swapRB;
+        $('flipV').checked = s.shared.flipV;
+        if (document.activeElement !== $('pagesBase')) $('pagesBase').value = s.shared.pagesBase;
       }
 
-      $('display').addEventListener('change', () => controlApi.set({ displayId: Number($('display').value) }).then(render));
-      $('fullscreen').addEventListener('click', () => controlApi.set({ fullscreen: !state.settings.fullscreen }).then(render));
-      $('reload').addEventListener('click', () => controlApi.action('reloadOutput').then(render));
-      $('showOutput').addEventListener('click', () => controlApi.action('showOutput').then(render));
-      $('syphon').addEventListener('click', () => controlApi.set({ syphon: !state.settings.syphon }).then(render));
-      $('swapRB').addEventListener('change', () => controlApi.set({ swapRB: $('swapRB').checked }).then(render));
-      $('flipV').addEventListener('change', () => controlApi.set({ flipV: $('flipV').checked }).then(render));
+      $('swapRB').addEventListener('change', () => controlApi.setShared({ swapRB: $('swapRB').checked }).then(render));
+      $('flipV').addEventListener('change', () => controlApi.setShared({ flipV: $('flipV').checked }).then(render));
       $('newCode').addEventListener('click', () => controlApi.action('newCode').then(render));
       $('openHere').addEventListener('click', () => controlApi.action('openController'));
-      $('savePages').addEventListener('click', () => controlApi.set({ pagesBase: $('pagesBase').value.trim() }).then(render));
+      $('savePages').addEventListener('click', () => controlApi.setShared({ pagesBase: $('pagesBase').value.trim() }).then(render));
 
       controlApi.onState(render);
       controlApi.getState().then(render);

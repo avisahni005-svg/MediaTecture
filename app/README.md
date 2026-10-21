@@ -35,7 +35,7 @@ When it asks for camera access, click **OK**.
 
 ## Using it
 
-The app opens two windows:
+The app opens a control window and an output window (display A). You can turn on a second output (display B) too.
 
 - **The output** is a normal window: drag it, resize it from its edges, or minimize it with the yellow button. By default it opens on
   your second screen if you have one, otherwise your main screen, and it remembers its size and place for next time.
@@ -43,13 +43,21 @@ The app opens two windows:
 - **The control window** (this is where you set things up). Reopen it any time from the menu: Output > Show Control Window (Cmd+1).
   Bring back the output window with Output > Show Output Window (Cmd+2).
 
+### Two displays (A and B)
+Display B is off at first. In the control window, press **Running** on the Display B card to turn it on. Each display has its
+own screen, window, full screen setting and MadMapper source, and each is controlled separately: it has its own camera,
+features, filters, sliders and Body/Screen Trace. On a phone, iPad or the in-app panel, a **tab for each display** appears
+once display B is running; the tab you pick is the one your buttons control. A camera QR code feeds every display that is
+open (pick which camera each display uses on its own tab). Two displays make the computer work harder, so turn B off when
+you do not need it.
+
 ### Any screen as the main display
 In the control window, pick the screen in **OUTPUT SCREEN** (the window moves there), or just drag the window yourself.
 Turn on **Full screen** to fill that screen.
 
 ### MadMapper
 1. In the control window turn on **Send to MadMapper**.
-2. In MadMapper add a **Syphon** input and choose **Face Projection**.
+2. In MadMapper add a **Syphon** input and choose **Face Projection** (display A) or **Face Projection 2** (display B).
 
 What MadMapper receives is exactly what the output window shows, at that window's size, so resize the output window to the
 size you want in MadMapper (or use full screen). Keep the output window open and not minimized while MadMapper is using it:

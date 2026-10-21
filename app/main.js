@@ -1,43 +1,57 @@
-// Face Projection desktop app.
-//   - an OUTPUT window shows the sketch full screen on whichever display you choose
-//   - optionally it also sends the picture to MadMapper (or any Syphon app) on macOS
-//   - a CONTROL window picks the display / MadMapper output and shows codes (QR) to connect other devices:
-//       any device can be the control panel (controller.html) and any device can be the camera (camera.html)
-const { app, BrowserWindow, Menu, screen, ipcMain, session, systemPreferences, shell } = require('electron');
+// Face Projection desktop app (Mac).
+//   - up to TWO output windows (display A and display B). Each is its own sketch with its own controls, its own
+//     camera and its own MadMapper (Syphon) source, and each can sit on a different screen.
+//   - a CONTROL window picks the screen / MadMapper output for each display and shows codes (QR) to connect other devices:
+//       any device can be the control panel (controller.html, one panel with a tab per display)
+//       and any device can be the camera (camera.html, it feeds every open display)
+const { app, BrowserWindow, Menu, screen, ipcMain, session, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 
-const SYPHON_NAME = 'Face Projection';
+const LABELS = ['A', 'B'];
+const SYPHON_NAMES = ['Face Projection', 'Face Projection 2']; // A keeps the original name so existing MadMapper projects still find it
 const DEFAULT_PAGES_BASE = 'https://avisahni005-svg.github.io/MediaTecture/simple/';
 
 // ---- settings (remembered between launches) ----
 let settingsFile;
 let settings;
 const randomCode = () => 'FP-' + crypto.randomBytes(5).toString('hex').toUpperCase();
+const newOutput = (enabled) => ({
+  enabled,            // is this display running
+  displayId: null,    // which screen it opens on (null = pick automatically)
+  fullscreen: false,  // true = macOS full screen on that screen (Esc leaves it); false = an ordinary window
+  windowBounds: null, // where the window was last left, and how big
+  syphon: false,      // send this display's picture to MadMapper
+});
 
 function loadSettings() {
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
   const defaults = {
-    displayId: null,       // which display the output goes to (null = pick automatically)
-    fullscreen: false,     // true = macOS full screen on that display (Esc leaves it); false = an ordinary window
-    windowBounds: null,    // where the output window was last left, and how big
-    syphon: false,         // send the picture to MadMapper
-    swapRB: false,         // fix for MadMapper showing red and blue swapped
-    flipV: true,           // fix for MadMapper showing the picture upside down
-    version: 2,
+    version: 3,
     pairingCode: randomCode(),
     pagesBase: DEFAULT_PAGES_BASE, // where the control panel / camera pages for other devices are hosted
+    swapRB: false,                 // fix for MadMapper showing red and blue swapped
+    flipV: true,                   // fix for MadMapper showing the picture upside down
+    outputs: [newOutput(true), newOutput(false)],
   };
   try {
     const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
-    // the first version forced a full-screen window that could not be minimized: start everyone in a normal window
-    if (!saved.version || saved.version < 2) {
-      saved.fullscreen = false;
-      saved.windowBounds = null;
+    if (!saved.outputs) {
+      // settings from the one-display versions: that single display becomes display A
+      saved.outputs = [
+        { ...newOutput(true), displayId: saved.displayId ?? null, fullscreen: !!saved.fullscreen, windowBounds: saved.windowBounds || null, syphon: !!saved.syphon },
+        newOutput(false),
+      ];
+      // the very first version forced a full-screen window that could not be minimized: start in a normal window
+      if (!saved.version || saved.version < 2) {
+        saved.outputs[0].fullscreen = false;
+        saved.outputs[0].windowBounds = null;
+      }
     }
-    settings = { ...defaults, ...saved, version: 2 };
+    settings = { ...defaults, ...saved, version: 3 };
+    settings.outputs = [0, 1].map((i) => ({ ...newOutput(i === 0), ...(saved.outputs[i] || {}) }));
   } catch (e) {
     settings = defaults;
   }
@@ -52,38 +66,48 @@ function saveSettings() {
   }
 }
 
-// ---- windows ----
-let displayWin = null;
+// ---- the two outputs ----
+const newRuntime = () => ({ win: null, syphonServer: null, syphonMessage: '', syphonSize: null, bridge: { controllers: 0, remoteCameras: 0, people: 0 } });
+const outs = [newRuntime(), newRuntime()];
 let controlWin = null;
-let bridge = { controllers: 0, remoteCameras: 0, people: 0 }; // what the output page reports
 const rendererErrors = [];
 
-function allDisplays() {
-  return screen.getAllDisplays();
-}
-// the chosen display, or the first external one, or the main one
-function currentDisplay() {
+const codeFor = (i) => settings.pairingCode + (i === 1 ? '-B' : '');
+const allDisplays = () => screen.getAllDisplays();
+const alive = (i) => outs[i].win && !outs[i].win.isDestroyed();
+
+// the chosen screen; otherwise display A prefers an external screen, and display B prefers a different one from A
+function currentDisplay(i) {
   const all = allDisplays();
-  return all.find((d) => d.id === settings.displayId) || all.find((d) => d.id !== screen.getPrimaryDisplay().id) || screen.getPrimaryDisplay();
+  const chosen = all.find((d) => d.id === settings.outputs[i].displayId);
+  if (chosen) return chosen;
+  const primary = screen.getPrimaryDisplay();
+  const external = all.filter((d) => d.id !== primary.id);
+  if (i === 0) return external[0] || primary;
+  const a = currentDisplay(0);
+  return external.find((d) => d.id !== a.id) || all.find((d) => d.id !== a.id) || a;
 }
 
-function createDisplayWindow() {
-  if (displayWin && !displayWin.isDestroyed()) displayWin.destroy();
-  const d = currentDisplay();
-  // a normal window: move it, resize it, minimize it. It opens where you left it, or centered on the chosen display.
-  const saved = settings.windowBounds;
+function createOutputWindow(i) {
+  const o = settings.outputs[i];
+  const out = outs[i];
+  if (alive(i)) out.win.destroy();
+  const d = currentDisplay(i);
+  // a normal window: move it, resize it, minimize it. It opens where you left it, or centered on the chosen screen.
+  const saved = o.windowBounds;
   const w = saved ? saved.width : 1280;
   const h = saved ? saved.height : 720;
   const onDisplay = (b) => b.x >= d.bounds.x - 50 && b.y >= d.bounds.y - 50 && b.x < d.bounds.x + d.bounds.width && b.y < d.bounds.y + d.bounds.height;
-  const x = saved && onDisplay(saved) ? saved.x : d.bounds.x + Math.round((d.bounds.width - w) / 2);
-  const y = saved && onDisplay(saved) ? saved.y : d.bounds.y + Math.round((d.bounds.height - h) / 2);
+  const shift = i === 1 && currentDisplay(0).id === d.id ? 60 : 0; // two windows on one screen: do not stack them exactly
+  const x = (saved && onDisplay(saved) ? saved.x : d.bounds.x + Math.round((d.bounds.width - w) / 2)) + shift;
+  const y = (saved && onDisplay(saved) ? saved.y : d.bounds.y + Math.round((d.bounds.height - h) / 2)) + shift;
   const win = new BrowserWindow({
     x, y, width: w, height: h,
     minWidth: 320,
     minHeight: 200,
     show: false,
     backgroundColor: '#000000',
-    title: 'Face Projection Output',
+    title: `Face Projection Output ${LABELS[i]}`,
     resizable: true,
     minimizable: true,
     maximizable: true,
@@ -96,25 +120,27 @@ function createDisplayWindow() {
       autoplayPolicy: 'no-user-gesture-required',
     },
   });
-  displayWin = win;
-  win.loadFile(path.join(__dirname, 'renderer', 'sketch.html'), { hash: settings.pairingCode });
+  out.win = win;
+  win.loadFile(path.join(__dirname, 'renderer', 'sketch.html'), { hash: codeFor(i) });
   win.once('ready-to-show', () => {
     win.show();
-    if (settings.fullscreen) win.setFullScreen(true);
+    if (o.fullscreen) win.setFullScreen(true);
   });
   win.webContents.on('did-finish-load', () => {
-    if (settings.syphon) attachSyphon();
+    win.setTitle(`Face Projection Output ${LABELS[i]}`); // the page sets its own title: keep ours so the two windows are easy to tell apart
+    if (o.syphon) attachSyphon(i);
   });
+  win.webContents.on('page-title-updated', (e) => e.preventDefault());
   win.webContents.on('console-message', (_e, level, message) => {
-    if (level >= 3) rendererErrors.push(message);
+    if (level >= 3) rendererErrors.push(`[${LABELS[i]}] ${message}`);
   });
 
   // hide the mouse arrow only while in full screen
   let hideCursorKey = null;
   win.on('enter-full-screen', async () => {
     hideCursorKey = await win.webContents.insertCSS('* { cursor: none !important; }');
-    if (!settings.fullscreen) {
-      settings.fullscreen = true;
+    if (!o.fullscreen) {
+      o.fullscreen = true;
       saveSettings();
       pushState();
     }
@@ -122,8 +148,8 @@ function createDisplayWindow() {
   win.on('leave-full-screen', () => {
     if (hideCursorKey) win.webContents.removeInsertedCSS(hideCursorKey).catch(() => {});
     hideCursorKey = null;
-    if (settings.fullscreen) {
-      settings.fullscreen = false;
+    if (o.fullscreen) {
+      o.fullscreen = false;
       saveSettings();
       pushState();
     }
@@ -135,7 +161,7 @@ function createDisplayWindow() {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       if (win.isDestroyed() || win.isFullScreen() || win.isMinimized()) return;
-      settings.windowBounds = win.getBounds();
+      o.windowBounds = win.getBounds();
       saveSettings();
     }, 500);
   };
@@ -154,9 +180,29 @@ function createDisplayWindow() {
     }
   });
   win.on('closed', () => {
-    detachSyphon();
-    if (displayWin === win) displayWin = null;
+    detachSyphon(i);
+    if (out.win === win) out.win = null;
+    out.bridge = { controllers: 0, remoteCameras: 0, people: 0 };
+    pushState();
   });
+}
+
+function destroyOutputWindow(i) {
+  detachSyphon(i);
+  if (alive(i)) outs[i].win.destroy();
+  outs[i].win = null;
+  outs[i].bridge = { controllers: 0, remoteCameras: 0, people: 0 };
+}
+
+function showOutput(i) {
+  if (!settings.outputs[i].enabled) return;
+  const out = outs[i];
+  if (!alive(i)) createOutputWindow(i);
+  else {
+    if (out.win.isMinimized()) out.win.restore();
+    out.win.show();
+    out.win.focus();
+  }
 }
 
 function createControlWindow() {
@@ -166,8 +212,8 @@ function createControlWindow() {
     return;
   }
   controlWin = new BrowserWindow({
-    width: 520,
-    height: 860,
+    width: 560,
+    height: 900,
     title: 'Face Projection',
     backgroundColor: '#0b0b0b',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, nodeIntegration: false },
@@ -187,106 +233,117 @@ function openControlPanelHere() {
   win.loadFile(path.join(__dirname, 'renderer', 'controller.html'), { hash: settings.pairingCode });
 }
 
-// ---- MadMapper output through Syphon (macOS only) ----
-let syphonServer = null;
-let syphonMessage = '';
-let syphonSize = null;
+// ---- MadMapper output through Syphon (macOS only): one source per display ----
+const syphonAvailable = () => process.platform === 'darwin';
 
-function syphonAvailable() {
-  return process.platform === 'darwin';
-}
-
-function attachSyphon() {
-  detachSyphon();
+function attachSyphon(i) {
+  detachSyphon(i);
+  const out = outs[i];
   if (!syphonAvailable()) {
-    syphonMessage = 'Syphon only exists on macOS.';
+    out.syphonMessage = 'Syphon only exists on macOS.';
     return;
   }
-  if (!displayWin || displayWin.isDestroyed()) {
-    syphonMessage = 'No output window.';
+  if (!alive(i)) {
+    out.syphonMessage = 'This display is not running.';
     return;
   }
   try {
     const { SyphonMetalServer } = require('node-syphon');
-    syphonServer = new SyphonMetalServer(SYPHON_NAME);
+    out.syphonServer = new SyphonMetalServer(SYPHON_NAMES[i]);
   } catch (e) {
-    syphonServer = null;
-    syphonMessage = 'Could not start Syphon: ' + e.message;
+    out.syphonServer = null;
+    out.syphonMessage = 'Could not start Syphon: ' + e.message;
     return;
   }
-  syphonMessage = `Publishing "${SYPHON_NAME}". In MadMapper pick it as a Syphon input.`;
-  displayWin.webContents.beginFrameSubscription(false, (image) => {
-    if (!syphonServer) return;
+  out.syphonMessage = `Publishing "${SYPHON_NAMES[i]}". In MadMapper pick it as a Syphon input.`;
+  out.win.webContents.beginFrameSubscription(false, (image) => {
+    if (!out.syphonServer) return;
     const { width, height } = image.getSize();
     if (!width || !height) return;
-    syphonSize = { width, height };
+    out.syphonSize = { width, height };
     const bmp = image.toBitmap(); // BGRA, top row first
     let data = new Uint8ClampedArray(bmp.buffer, bmp.byteOffset, bmp.byteLength);
     if (settings.swapRB) {
       data = Uint8ClampedArray.from(data);
-      for (let i = 0; i < data.length; i += 4) {
-        const t = data[i];
-        data[i] = data[i + 2];
-        data[i + 2] = t;
+      for (let p = 0; p < data.length; p += 4) {
+        const t = data[p];
+        data[p] = data[p + 2];
+        data[p + 2] = t;
       }
     }
     try {
-      syphonServer.publishImageData(data, { x: 0, y: 0, width, height }, { width, height }, settings.flipV);
+      out.syphonServer.publishImageData(data, { x: 0, y: 0, width, height }, { width, height }, settings.flipV);
     } catch (e) {
-      syphonMessage = 'Syphon error: ' + e.message;
+      out.syphonMessage = 'Syphon error: ' + e.message;
     }
   });
 }
 
-function detachSyphon() {
-  if (displayWin && !displayWin.isDestroyed()) {
-    try { displayWin.webContents.endFrameSubscription(); } catch (e) {}
+function detachSyphon(i) {
+  const out = outs[i];
+  if (alive(i)) {
+    try { out.win.webContents.endFrameSubscription(); } catch (e) {}
   }
-  if (syphonServer) {
-    try { syphonServer.dispose(); } catch (e) {}
-    syphonServer = null;
+  if (out.syphonServer) {
+    try { out.syphonServer.dispose(); } catch (e) {}
+    out.syphonServer = null;
   }
-  syphonSize = null;
+  out.syphonSize = null;
 }
 
-// ---- settings changes from the control window / menu ----
-function applySettings(patch) {
-  const before = { ...settings };
-  Object.assign(settings, patch);
+// ---- changes from the control window / menu ----
+function applyOutput(i, patch) {
+  const o = settings.outputs[i];
+  const before = { ...o };
+  Object.assign(o, patch);
   saveSettings();
 
-  if (patch.fullscreen !== undefined && patch.fullscreen !== before.fullscreen) {
-    if (displayWin && !displayWin.isDestroyed()) displayWin.setFullScreen(!!settings.fullscreen);
+  if (patch.enabled !== undefined && patch.enabled !== before.enabled) {
+    if (o.enabled) createOutputWindow(i);
+    else destroyOutputWindow(i);
   }
-  if (patch.displayId !== undefined && patch.displayId !== before.displayId) moveOutputToDisplay();
-  if (patch.pairingCode !== undefined && patch.pairingCode !== before.pairingCode) createDisplayWindow();
+  if (alive(i)) {
+    if (patch.fullscreen !== undefined && patch.fullscreen !== before.fullscreen) outs[i].win.setFullScreen(!!o.fullscreen);
+    if (patch.displayId !== undefined && patch.displayId !== before.displayId) moveOutputToDisplay(i);
+  }
   if (patch.syphon !== undefined && patch.syphon !== before.syphon) {
-    if (settings.syphon) attachSyphon();
+    if (o.syphon) attachSyphon(i);
     else {
-      detachSyphon();
-      syphonMessage = '';
+      detachSyphon(i);
+      outs[i].syphonMessage = '';
     }
   }
   buildMenu();
   pushState();
 }
 
-// move the output window onto the chosen display (keeping its size), leaving and re-entering full screen if needed
-function moveOutputToDisplay() {
-  if (!displayWin || displayWin.isDestroyed()) return;
-  const d = currentDisplay();
-  const wasFull = displayWin.isFullScreen();
+function applyShared(patch) {
+  const before = { ...settings };
+  Object.assign(settings, patch);
+  saveSettings();
+  if (patch.pairingCode !== undefined && patch.pairingCode !== before.pairingCode) {
+    [0, 1].forEach((i) => settings.outputs[i].enabled && createOutputWindow(i)); // new code: reload both displays
+  }
+  pushState();
+}
+
+// move a window onto its chosen screen (keeping its size), leaving and re-entering full screen if needed
+function moveOutputToDisplay(i) {
+  if (!alive(i)) return;
+  const win = outs[i].win;
+  const d = currentDisplay(i);
+  const wasFull = win.isFullScreen();
   const move = () => {
-    if (!displayWin || displayWin.isDestroyed()) return;
-    const b = displayWin.getBounds();
+    if (win.isDestroyed()) return;
+    const b = win.getBounds();
     const w = Math.min(b.width, d.bounds.width);
     const h = Math.min(b.height, d.bounds.height);
-    displayWin.setBounds({ x: d.bounds.x + Math.round((d.bounds.width - w) / 2), y: d.bounds.y + Math.round((d.bounds.height - h) / 2), width: w, height: h });
-    if (wasFull) setTimeout(() => displayWin && !displayWin.isDestroyed() && displayWin.setFullScreen(true), 300);
+    win.setBounds({ x: d.bounds.x + Math.round((d.bounds.width - w) / 2), y: d.bounds.y + Math.round((d.bounds.height - h) / 2), width: w, height: h });
+    if (wasFull) setTimeout(() => !win.isDestroyed() && win.setFullScreen(true), 300);
   };
   if (wasFull) {
-    displayWin.once('leave-full-screen', () => setTimeout(move, 300));
-    displayWin.setFullScreen(false);
+    win.once('leave-full-screen', () => setTimeout(move, 300));
+    win.setFullScreen(false);
   } else {
     move();
   }
@@ -303,18 +360,27 @@ async function buildState() {
     camera: await QRCode.toDataURL(urls.camera, { margin: 1, width: 240 }),
   };
   const primary = screen.getPrimaryDisplay().id;
-  const current = currentDisplay().id;
   return {
-    displays: allDisplays().map((d, i) => ({
-      id: d.id,
-      label: `${d.label || 'Display ' + (i + 1)}  ${d.bounds.width}x${d.bounds.height}${d.id === primary ? '  (main)' : ''}`,
-      current: d.id === current,
-    })),
-    settings,
+    shared: { pairingCode: settings.pairingCode, pagesBase: settings.pagesBase, swapRB: settings.swapRB, flipV: settings.flipV },
     urls,
     qr,
-    syphon: { available: syphonAvailable(), running: !!syphonServer, message: syphonMessage, size: syphonSize, name: SYPHON_NAME },
-    bridge,
+    syphonAvailable: syphonAvailable(),
+    outputs: [0, 1].map((i) => {
+      const current = currentDisplay(i).id;
+      return {
+        index: i,
+        label: LABELS[i],
+        settings: settings.outputs[i],
+        displays: allDisplays().map((d, n) => ({
+          id: d.id,
+          label: `${d.label || 'Display ' + (n + 1)}  ${d.bounds.width}x${d.bounds.height}${d.id === primary ? '  (main)' : ''}`,
+          current: d.id === current,
+        })),
+        syphon: { running: !!outs[i].syphonServer, message: outs[i].syphonMessage, size: outs[i].syphonSize, name: SYPHON_NAMES[i] },
+        bridge: outs[i].bridge,
+        open: alive(i),
+      };
+    }),
   };
 }
 
@@ -323,41 +389,51 @@ async function pushState() {
 }
 
 ipcMain.handle('control:get', () => buildState());
-ipcMain.handle('control:set', async (_e, patch) => {
-  applySettings(patch);
+ipcMain.handle('control:setShared', async (_e, patch) => {
+  applyShared(patch);
   return buildState();
 });
-ipcMain.handle('control:action', async (_e, name) => {
-  if (name === 'newCode') applySettings({ pairingCode: randomCode() });
+ipcMain.handle('control:setOutput', async (_e, index, patch) => {
+  applyOutput(index, patch);
+  return buildState();
+});
+ipcMain.handle('control:action', async (_e, name, index) => {
+  if (name === 'newCode') applyShared({ pairingCode: randomCode() });
   if (name === 'openController') openControlPanelHere();
-  if (name === 'reloadOutput') createDisplayWindow();
-  if (name === 'showOutput') {
-    if (!displayWin || displayWin.isDestroyed()) createDisplayWindow();
-    else {
-      if (displayWin.isMinimized()) displayWin.restore();
-      displayWin.show();
-      displayWin.focus();
-    }
-  }
+  if (name === 'reloadOutput' && settings.outputs[index].enabled) createOutputWindow(index);
+  if (name === 'showOutput') showOutput(index);
   return buildState();
 });
-ipcMain.on('show-output', () => {
-  if (!displayWin || displayWin.isDestroyed()) createDisplayWindow();
-  else {
-    if (displayWin.isMinimized()) displayWin.restore();
-    displayWin.show();
-    displayWin.focus();
-  }
-});
-ipcMain.on('from-sketch', (_e, channel, data) => {
-  if (channel === 'status') {
-    bridge = data;
+ipcMain.on('show-output', (_e, index) => showOutput(index));
+ipcMain.on('from-sketch', (e, channel, data) => {
+  const i = outs.findIndex((o) => o.win && !o.win.isDestroyed() && o.win.webContents === e.sender);
+  if (i >= 0 && channel === 'status') {
+    outs[i].bridge = data;
     pushState();
   }
 });
 
 // ---- menu ----
 function buildMenu() {
+  const outputMenu = (i) => ({
+    label: `Display ${LABELS[i]}`,
+    submenu: [
+      { label: 'Running', type: 'checkbox', checked: settings.outputs[i].enabled, click: (item) => applyOutput(i, { enabled: item.checked }) },
+      { label: 'Show Window', accelerator: `CmdOrCtrl+${i + 2}`, click: () => showOutput(i) },
+      {
+        label: 'Screen',
+        submenu: allDisplays().map((d, n) => ({
+          label: `${d.label || 'Display ' + (n + 1)} (${d.bounds.width}x${d.bounds.height})`,
+          type: 'radio',
+          checked: d.id === currentDisplay(i).id,
+          click: () => applyOutput(i, { displayId: d.id }),
+        })),
+      },
+      { label: 'Full Screen', type: 'checkbox', checked: settings.outputs[i].fullscreen, click: (item) => applyOutput(i, { fullscreen: item.checked }) },
+      { label: 'Send to MadMapper (Syphon)', type: 'checkbox', checked: settings.outputs[i].syphon, enabled: syphonAvailable(), click: (item) => applyOutput(i, { syphon: item.checked }) },
+      { label: 'Reload', click: () => settings.outputs[i].enabled && createOutputWindow(i) },
+    ],
+  });
   const template = [
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
     {
@@ -365,26 +441,21 @@ function buildMenu() {
       submenu: [
         { label: 'Show Control Window', accelerator: 'CmdOrCtrl+1', click: createControlWindow },
         { type: 'separator' },
-        {
-          label: 'Output Display',
-          submenu: allDisplays().map((d, i) => ({
-            label: `${d.label || 'Display ' + (i + 1)} (${d.bounds.width}x${d.bounds.height})`,
-            type: 'radio',
-            checked: d.id === currentDisplay().id,
-            click: () => applySettings({ displayId: d.id }),
-          })),
-        },
-        { label: 'Full Screen Output', type: 'checkbox', checked: settings.fullscreen, accelerator: 'CmdOrCtrl+F', click: (item) => applySettings({ fullscreen: item.checked }) },
-        { label: 'Show Output Window', accelerator: 'CmdOrCtrl+2', click: () => ipcMain.emit('show-output') },
-        { label: 'Send to MadMapper (Syphon)', type: 'checkbox', checked: settings.syphon, enabled: syphonAvailable(), click: (item) => applySettings({ syphon: item.checked }) },
+        outputMenu(0),
+        outputMenu(1),
         { type: 'separator' },
-        { label: 'Reload Output', accelerator: 'CmdOrCtrl+R', click: createDisplayWindow },
         { label: 'Open Control Panel in This App', click: openControlPanelHere },
       ],
     },
     { role: 'editMenu' },
     { role: 'windowMenu' },
-    { label: 'Help', submenu: [{ label: 'Developer Tools (output)', click: () => displayWin && displayWin.webContents.openDevTools({ mode: 'detach' }) }] },
+    {
+      label: 'Help',
+      submenu: [
+        { label: 'Developer Tools (display A)', click: () => alive(0) && outs[0].win.webContents.openDevTools({ mode: 'detach' }) },
+        { label: 'Developer Tools (display B)', click: () => alive(1) && outs[1].win.webContents.openDevTools({ mode: 'detach' }) },
+      ],
+    },
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
@@ -406,23 +477,25 @@ app.whenReady().then(async () => {
   }
 
   buildMenu();
-  createDisplayWindow();
+  [0, 1].forEach((i) => settings.outputs[i].enabled && createOutputWindow(i));
   createControlWindow();
 
   screen.on('display-added', () => { buildMenu(); pushState(); });
-  screen.on('display-removed', () => {
-    buildMenu();
-    pushState();
-  });
+  screen.on('display-removed', () => { buildMenu(); pushState(); });
   screen.on('display-metrics-changed', () => pushState());
   app.on('activate', () => {
-    if (!displayWin) createDisplayWindow();
+    [0, 1].forEach((i) => settings.outputs[i].enabled && !alive(i) && createOutputWindow(i));
     if (!controlWin) createControlWindow();
   });
 });
 
 app.on('window-all-closed', () => app.quit());
-app.on('before-quit', detachSyphon);
+app.on('before-quit', () => [0, 1].forEach(detachSyphon));
 
 // for the automated check in test/smoke.js
-module.exports = { getWindows: () => ({ displayWin, controlWin }), rendererErrors, getSettings: () => settings };
+module.exports = {
+  getWindows: () => ({ outputs: outs.map((o) => o.win), controlWin }),
+  rendererErrors,
+  getSettings: () => settings,
+  applyOutput,
+};
