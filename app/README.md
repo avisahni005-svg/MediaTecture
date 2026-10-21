@@ -37,21 +37,25 @@ When it asks for camera access, click **OK**.
 
 The app opens two windows:
 
-- **The output** goes full screen on one display. By default that is your second screen if you have one, otherwise your main screen.
-  Esc leaves full screen so you can get your mouse back. Cmd+F toggles full screen again.
-- **The control window** (this is where you set things up). Reopen it any time from the menu: Output > Show Control Window.
+- **The output** is a normal window: drag it, resize it from its edges, or minimize it with the yellow button. By default it opens on
+  your second screen if you have one, otherwise your main screen, and it remembers its size and place for next time.
+  For a projector or TV, drag it there and turn **Full screen** on (the green button works too). Esc or Cmd+F leaves full screen.
+- **The control window** (this is where you set things up). Reopen it any time from the menu: Output > Show Control Window (Cmd+1).
+  Bring back the output window with Output > Show Output Window (Cmd+2).
 
 ### Any screen as the main display
-In the control window, pick the screen in **OUTPUT SCREEN**. Switch **Full screen** off for an ordinary window you can move around.
+In the control window, pick the screen in **OUTPUT SCREEN** (the window moves there), or just drag the window yourself.
+Turn on **Full screen** to fill that screen.
 
 ### MadMapper
 1. In the control window turn on **Send to MadMapper**.
 2. In MadMapper add a **Syphon** input and choose **Face Projection**.
 
-What MadMapper receives is exactly what the output window shows, at that window's size. (To send it to MadMapper without
-using a screen, set **Full screen** off and make the window small or move it out of the way.)
+What MadMapper receives is exactly what the output window shows, at that window's size, so resize the output window to the
+size you want in MadMapper (or use full screen). Keep the output window open and not minimized while MadMapper is using it:
+a minimized window may stop sending new pictures.
 If the colours look wrong tick **Swap red and blue**; if the picture is upside down tick or untick **Flip vertically**.
-Syphon only exists on Mac. A Windows version could send Spout instead (not included yet).
+This app is for Mac only.
 
 ### Any device as the control panel
 In the control window, scan the **CONTROL PANEL** QR code with a phone or iPad (or open the link under it on any

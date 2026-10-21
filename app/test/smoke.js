@@ -14,6 +14,21 @@ app.whenReady().then(async () => {
   const report = {};
   report.windows = { display: !!displayWin && !displayWin.isDestroyed(), control: !!controlWin && !controlWin.isDestroyed() };
   report.displayBounds = displayWin && displayWin.getBounds();
+  if (displayWin) {
+    report.windowFeatures = { resizable: displayWin.isResizable(), minimizable: displayWin.isMinimizable(), maximizable: displayWin.isMaximizable(), fullScreenable: displayWin.isFullScreenable(), frame: !displayWin.isKiosk() };
+    // try them: resize, minimize, restore
+    displayWin.setBounds({ x: 50, y: 50, width: 900, height: 500 });
+    await wait(500);
+    report.afterResize = displayWin.getBounds();
+    displayWin.minimize();
+    await wait(800);
+    report.minimized = displayWin.isMinimized();
+    displayWin.restore();
+    await wait(800);
+    report.restored = !displayWin.isMinimized();
+    // the sketch should now fill the new, smaller window
+    report.canvasAfterResize = await displayWin.webContents.executeJavaScript('[document.querySelector("canvas").width, document.querySelector("canvas").height]');
+  }
   report.displayTitle = displayWin && displayWin.getTitle();
   report.settings = main.getSettings();
   report.rendererErrors = main.rendererErrors;

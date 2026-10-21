@@ -21,15 +21,23 @@ function loadSettings() {
   settingsFile = path.join(app.getPath('userData'), 'settings.json');
   const defaults = {
     displayId: null,       // which display the output goes to (null = pick automatically)
-    fullscreen: true,      // output fills the display; false = an ordinary window
+    fullscreen: false,     // true = macOS full screen on that display (Esc leaves it); false = an ordinary window
+    windowBounds: null,    // where the output window was last left, and how big
     syphon: false,         // send the picture to MadMapper
     swapRB: false,         // fix for MadMapper showing red and blue swapped
     flipV: true,           // fix for MadMapper showing the picture upside down
+    version: 2,
     pairingCode: randomCode(),
     pagesBase: DEFAULT_PAGES_BASE, // where the control panel / camera pages for other devices are hosted
   };
   try {
-    settings = { ...defaults, ...JSON.parse(fs.readFileSync(settingsFile, 'utf8')) };
+    const saved = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    // the first version forced a full-screen window that could not be minimized: start everyone in a normal window
+    if (!saved.version || saved.version < 2) {
+      saved.fullscreen = false;
+      saved.windowBounds = null;
+    }
+    settings = { ...defaults, ...saved, version: 2 };
   } catch (e) {
     settings = defaults;
   }
@@ -62,11 +70,24 @@ function currentDisplay() {
 function createDisplayWindow() {
   if (displayWin && !displayWin.isDestroyed()) displayWin.destroy();
   const d = currentDisplay();
-  const fs_ = settings.fullscreen;
-  const opts = {
+  // a normal window: move it, resize it, minimize it. It opens where you left it, or centered on the chosen display.
+  const saved = settings.windowBounds;
+  const w = saved ? saved.width : 1280;
+  const h = saved ? saved.height : 720;
+  const onDisplay = (b) => b.x >= d.bounds.x - 50 && b.y >= d.bounds.y - 50 && b.x < d.bounds.x + d.bounds.width && b.y < d.bounds.y + d.bounds.height;
+  const x = saved && onDisplay(saved) ? saved.x : d.bounds.x + Math.round((d.bounds.width - w) / 2);
+  const y = saved && onDisplay(saved) ? saved.y : d.bounds.y + Math.round((d.bounds.height - h) / 2);
+  const win = new BrowserWindow({
+    x, y, width: w, height: h,
+    minWidth: 320,
+    minHeight: 200,
     show: false,
     backgroundColor: '#000000',
     title: 'Face Projection Output',
+    resizable: true,
+    minimizable: true,
+    maximizable: true,
+    fullscreenable: true,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -74,36 +95,62 @@ function createDisplayWindow() {
       backgroundThrottling: false, // keep drawing at full speed even when it is behind other windows
       autoplayPolicy: 'no-user-gesture-required',
     },
-  };
-  if (fs_) {
-    Object.assign(opts, { x: d.bounds.x, y: d.bounds.y, width: d.bounds.width, height: d.bounds.height, frame: false, resizable: false, movable: false, fullscreenable: false, hasShadow: false, skipTaskbar: true, enableLargerThanScreen: true });
-  } else {
-    Object.assign(opts, { x: d.bounds.x + 80, y: d.bounds.y + 80, width: 1280, height: 720, frame: true });
-  }
-  const win = new BrowserWindow(opts);
+  });
   displayWin = win;
-  if (fs_) {
-    win.setAlwaysOnTop(true, 'screen-saver'); // above the menu bar and dock
-    win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  }
   win.loadFile(path.join(__dirname, 'renderer', 'sketch.html'), { hash: settings.pairingCode });
-  win.once('ready-to-show', () => win.show());
+  win.once('ready-to-show', () => {
+    win.show();
+    if (settings.fullscreen) win.setFullScreen(true);
+  });
   win.webContents.on('did-finish-load', () => {
-    if (fs_) win.webContents.insertCSS('* { cursor: none !important; }');
     if (settings.syphon) attachSyphon();
   });
   win.webContents.on('console-message', (_e, level, message) => {
     if (level >= 3) rendererErrors.push(message);
   });
-  // Esc leaves full screen (so you can get your mouse back); F toggles it
+
+  // hide the mouse arrow only while in full screen
+  let hideCursorKey = null;
+  win.on('enter-full-screen', async () => {
+    hideCursorKey = await win.webContents.insertCSS('* { cursor: none !important; }');
+    if (!settings.fullscreen) {
+      settings.fullscreen = true;
+      saveSettings();
+      pushState();
+    }
+  });
+  win.on('leave-full-screen', () => {
+    if (hideCursorKey) win.webContents.removeInsertedCSS(hideCursorKey).catch(() => {});
+    hideCursorKey = null;
+    if (settings.fullscreen) {
+      settings.fullscreen = false;
+      saveSettings();
+      pushState();
+    }
+  });
+
+  // remember the size and place, so it opens the same next time
+  let saveTimer = null;
+  const rememberBounds = () => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      if (win.isDestroyed() || win.isFullScreen() || win.isMinimized()) return;
+      settings.windowBounds = win.getBounds();
+      saveSettings();
+    }, 500);
+  };
+  win.on('resize', rememberBounds);
+  win.on('move', rememberBounds);
+
+  // Esc leaves full screen; Cmd+F toggles it
   win.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
-    if (input.key === 'Escape' && settings.fullscreen) {
+    if (input.key === 'Escape' && win.isFullScreen()) {
       event.preventDefault();
-      applySettings({ fullscreen: false });
-    } else if (input.key.toLowerCase() === 'f' && (input.meta || input.control)) {
+      win.setFullScreen(false);
+    } else if (input.key.toLowerCase() === 'f' && input.meta) {
       event.preventDefault();
-      applySettings({ fullscreen: !settings.fullscreen });
+      win.setFullScreen(!win.isFullScreen());
     }
   });
   win.on('closed', () => {
@@ -209,14 +256,9 @@ function applySettings(patch) {
   saveSettings();
 
   if (patch.fullscreen !== undefined && patch.fullscreen !== before.fullscreen) {
-    createDisplayWindow(); // a window's frame can't change after it is made
-  } else if (patch.displayId !== undefined && patch.displayId !== before.displayId) {
-    if (displayWin && !displayWin.isDestroyed()) {
-      const d = currentDisplay();
-      if (settings.fullscreen) displayWin.setBounds(d.bounds);
-      else displayWin.setBounds({ x: d.bounds.x + 80, y: d.bounds.y + 80, width: 1280, height: 720 });
-    }
+    if (displayWin && !displayWin.isDestroyed()) displayWin.setFullScreen(!!settings.fullscreen);
   }
+  if (patch.displayId !== undefined && patch.displayId !== before.displayId) moveOutputToDisplay();
   if (patch.pairingCode !== undefined && patch.pairingCode !== before.pairingCode) createDisplayWindow();
   if (patch.syphon !== undefined && patch.syphon !== before.syphon) {
     if (settings.syphon) attachSyphon();
@@ -227,6 +269,27 @@ function applySettings(patch) {
   }
   buildMenu();
   pushState();
+}
+
+// move the output window onto the chosen display (keeping its size), leaving and re-entering full screen if needed
+function moveOutputToDisplay() {
+  if (!displayWin || displayWin.isDestroyed()) return;
+  const d = currentDisplay();
+  const wasFull = displayWin.isFullScreen();
+  const move = () => {
+    if (!displayWin || displayWin.isDestroyed()) return;
+    const b = displayWin.getBounds();
+    const w = Math.min(b.width, d.bounds.width);
+    const h = Math.min(b.height, d.bounds.height);
+    displayWin.setBounds({ x: d.bounds.x + Math.round((d.bounds.width - w) / 2), y: d.bounds.y + Math.round((d.bounds.height - h) / 2), width: w, height: h });
+    if (wasFull) setTimeout(() => displayWin && !displayWin.isDestroyed() && displayWin.setFullScreen(true), 300);
+  };
+  if (wasFull) {
+    displayWin.once('leave-full-screen', () => setTimeout(move, 300));
+    displayWin.setFullScreen(false);
+  } else {
+    move();
+  }
 }
 
 async function buildState() {
@@ -268,8 +331,23 @@ ipcMain.handle('control:action', async (_e, name) => {
   if (name === 'newCode') applySettings({ pairingCode: randomCode() });
   if (name === 'openController') openControlPanelHere();
   if (name === 'reloadOutput') createDisplayWindow();
-  if (name === 'showOutput' && displayWin) displayWin.show();
+  if (name === 'showOutput') {
+    if (!displayWin || displayWin.isDestroyed()) createDisplayWindow();
+    else {
+      if (displayWin.isMinimized()) displayWin.restore();
+      displayWin.show();
+      displayWin.focus();
+    }
+  }
   return buildState();
+});
+ipcMain.on('show-output', () => {
+  if (!displayWin || displayWin.isDestroyed()) createDisplayWindow();
+  else {
+    if (displayWin.isMinimized()) displayWin.restore();
+    displayWin.show();
+    displayWin.focus();
+  }
 });
 ipcMain.on('from-sketch', (_e, channel, data) => {
   if (channel === 'status') {
@@ -296,7 +374,8 @@ function buildMenu() {
             click: () => applySettings({ displayId: d.id }),
           })),
         },
-        { label: 'Fullscreen Output', type: 'checkbox', checked: settings.fullscreen, accelerator: 'CmdOrCtrl+F', click: (item) => applySettings({ fullscreen: item.checked }) },
+        { label: 'Full Screen Output', type: 'checkbox', checked: settings.fullscreen, accelerator: 'CmdOrCtrl+F', click: (item) => applySettings({ fullscreen: item.checked }) },
+        { label: 'Show Output Window', accelerator: 'CmdOrCtrl+2', click: () => ipcMain.emit('show-output') },
         { label: 'Send to MadMapper (Syphon)', type: 'checkbox', checked: settings.syphon, enabled: syphonAvailable(), click: (item) => applySettings({ syphon: item.checked }) },
         { type: 'separator' },
         { label: 'Reload Output', accelerator: 'CmdOrCtrl+R', click: createDisplayWindow },
@@ -333,13 +412,9 @@ app.whenReady().then(async () => {
   screen.on('display-added', () => { buildMenu(); pushState(); });
   screen.on('display-removed', () => {
     buildMenu();
-    if (displayWin && !displayWin.isDestroyed() && settings.fullscreen) displayWin.setBounds(currentDisplay().bounds);
     pushState();
   });
-  screen.on('display-metrics-changed', () => {
-    if (displayWin && !displayWin.isDestroyed() && settings.fullscreen) displayWin.setBounds(currentDisplay().bounds);
-    pushState();
-  });
+  screen.on('display-metrics-changed', () => pushState());
   app.on('activate', () => {
     if (!displayWin) createDisplayWindow();
     if (!controlWin) createControlWindow();

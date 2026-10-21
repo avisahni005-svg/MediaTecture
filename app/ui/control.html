@@ -34,9 +34,10 @@
     <select id="display"></select>
     <div class="row">
       <button id="fullscreen"></button>
-      <button id="reload">Reload output</button>
+      <button id="showOutput">Show output window</button>
     </div>
-    <div class="note">Esc leaves full screen on the output screen. Cmd+F toggles it.</div>
+    <div class="row"><button id="reload">Reload output</button></div>
+    <div class="note">The output is a normal window: drag it, resize it, or minimize it. Picking a screen above moves it there. Full screen fills that screen (Esc or Cmd+F leaves it).</div>
 
     <h2>MADMAPPER (SYPHON)</h2>
     <button id="syphon" class="wide"></button>
@@ -78,18 +79,18 @@
           o.selected = d.current;
           sel.appendChild(o);
         }
-        $('fullscreen').textContent = s.settings.fullscreen ? 'Full screen: ON' : 'Full screen: OFF (window)';
+        $('fullscreen').textContent = s.settings.fullscreen ? 'Full screen: ON' : 'Full screen: OFF';
         $('fullscreen').className = s.settings.fullscreen ? '' : 'off';
 
         const sy = s.syphon;
-        $('syphon').textContent = sy.available ? (s.settings.syphon ? 'Sending to MadMapper: ON' : 'Send to MadMapper: OFF') : 'Syphon needs a Mac';
+        $('syphon').textContent = s.settings.syphon ? 'Sending to MadMapper: ON' : 'Send to MadMapper: OFF';
         $('syphon').className = 'wide' + (s.settings.syphon ? '' : ' off');
         $('syphon').disabled = !sy.available;
         const size = sy.size ? ` (${sy.size.width}x${sy.size.height})` : '';
         $('syphonNote').className = 'note' + (sy.message.startsWith('Could not') || sy.message.startsWith('Syphon error') ? ' bad' : '');
-        $('syphonNote').textContent = sy.available
-          ? (sy.running ? sy.message + size : sy.message || `Turn this on, then in MadMapper add a Syphon input and pick "${sy.name}". The Syphon picture is the output window, so choose the output screen above first.`)
-          : 'MadMapper on Windows uses Spout instead of Syphon, which this app does not send yet.';
+        $('syphonNote').textContent = sy.running
+          ? sy.message + size
+          : sy.message || `Turn this on, then in MadMapper add a Syphon input and pick "${sy.name}". What MadMapper receives is the picture in the output window, at the window's size.`;
         $('swapRB').checked = s.settings.swapRB;
         $('flipV').checked = s.settings.flipV;
 
@@ -108,6 +109,7 @@
       $('display').addEventListener('change', () => controlApi.set({ displayId: Number($('display').value) }).then(render));
       $('fullscreen').addEventListener('click', () => controlApi.set({ fullscreen: !state.settings.fullscreen }).then(render));
       $('reload').addEventListener('click', () => controlApi.action('reloadOutput').then(render));
+      $('showOutput').addEventListener('click', () => controlApi.action('showOutput').then(render));
       $('syphon').addEventListener('click', () => controlApi.set({ syphon: !state.settings.syphon }).then(render));
       $('swapRB').addEventListener('change', () => controlApi.set({ swapRB: $('swapRB').checked }).then(render));
       $('flipV').addEventListener('change', () => controlApi.set({ flipV: $('flipV').checked }).then(render));
