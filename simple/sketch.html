@@ -159,6 +159,7 @@ function windowResized() {
 
 function draw() {
   background(0);
+  syncVideoSize(); // cheap safety net in case a size change was missed
 
   const vw = video.elt.videoWidth || video.width;
   const vh = video.elt.videoHeight || video.height;
@@ -992,10 +993,10 @@ function startSource(makeVideo, activeId) {
   activeCamera = activeId;
   // The face tracker reports positions in the video element's own width/height, so that must equal the camera's
   // real pixel size. (Forcing the element to 800x800 while the camera sends 1280x720 put every box in the wrong place.)
-  vid.elt.addEventListener('loadedmetadata', () => {
-    vid.elt.width = vid.elt.videoWidth;
-    vid.elt.height = vid.elt.videoHeight;
-  });
+  // A phone camera's picture size changes while it streams (the connection adapts to the network, or the phone
+  // is turned), so keep the element's size in step with the picture every time it changes, not just at the start.
+  vid.elt.addEventListener('loadedmetadata', syncVideoSize);
+  vid.elt.addEventListener('resize', syncVideoSize);
 
   const startTracking = () => {
     if (vid !== video) return; // the user already switched to another camera
@@ -1008,6 +1009,15 @@ function startSource(makeVideo, activeId) {
     startTracking(); // the model loaded in preload()
   } else {
     faceMesh = ml5.faceMesh({ maxFaces: MAX_PEOPLE }, startTracking);
+  }
+}
+
+// make the video element's width/height equal the picture's real size (the face tracker measures against it)
+function syncVideoSize() {
+  const el = video && video.elt;
+  if (el && el.videoWidth && (el.width !== el.videoWidth || el.height !== el.videoHeight)) {
+    el.width = el.videoWidth;
+    el.height = el.videoHeight;
   }
 }
 

@@ -24,6 +24,7 @@
         <select id="cams"></select>
         <button id="flip">Flip camera</button>
       </div>
+      <small id="tip">Tip: hold the phone sideways (landscape) and keep it still, ideally on a stand.</small>
       <small id="code"></small>
     </main>
     <script>
@@ -70,6 +71,7 @@ async function startCamera(deviceId) {
   await fillCameraList();
 
   const track = stream.getVideoTracks()[0];
+  try { track.contentHint = 'detail'; } catch (e) {} // tell the browser sharpness matters more than smoothness
   const sender = call && call.peerConnection && call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
   if (sender) sender.replaceTrack(track); // already streaming: swap the picture without reconnecting
   else connectToSketch();
@@ -88,6 +90,22 @@ async function fillCameraList() {
   });
 }
 
+// Face tracking needs a sharp picture. By default the connection quietly lowers the resolution when the network
+// is busy; ask it to lower the frame rate instead, and allow a higher quality.
+let tuned = null;
+function tuneSender() {
+  const sender = call && call.peerConnection && call.peerConnection.getSenders().find((s) => s.track && s.track.kind === 'video');
+  if (!sender || tuned === sender) return;
+  tuned = sender;
+  try {
+    const params = sender.getParameters();
+    if (!params.encodings || !params.encodings.length) params.encodings = [{}];
+    params.degradationPreference = 'maintain-resolution';
+    params.encodings[0].maxBitrate = 6000000;
+    sender.setParameters(params).catch(() => {});
+  } catch (e) {}
+}
+
 function connectToSketch() {
   clearTimeout(retryTimer);
   if (!peer || !peer.open || !stream) return;
@@ -104,7 +122,10 @@ function connectToSketch() {
   const watch = setInterval(() => {
     if (!call) return clearInterval(watch);
     const st = call.peerConnection && call.peerConnection.iceConnectionState;
-    if (st === 'connected' || st === 'completed') say('Streaming this camera to the sketch');
+    if (st === 'connected' || st === 'completed') {
+      say('Streaming this camera to the sketch');
+      tuneSender();
+    }
     if (st === 'failed' || st === 'closed') {
       clearInterval(watch);
       lost();
