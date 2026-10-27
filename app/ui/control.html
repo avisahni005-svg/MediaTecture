@@ -34,18 +34,23 @@
   </head>
   <body>
     <h1>FACE PROJECTION</h1>
-    <div class="note">Two separate displays. Each has its own screen, camera, controls and MadMapper source. Control both from one panel (it has a tab for each).</div>
+    <div class="note">Two separate displays. Each has its own screen, camera, controls and MadMapper source. Each display has its own control panel, so you can control both at the same time.</div>
 
     <div id="outputs"></div>
 
     <h2>CONTROL PANEL AND CAMERAS (ANY DEVICE)</h2>
     <div class="code" id="code"></div>
-    <div class="row"><button id="newCode">New code</button><button id="openHere">Open control panel in this app</button></div>
+    <div class="row"><button id="newCode">New code</button></div>
+    <div class="row"><button id="openHereA">Open panel A in this app</button><button id="openHereB">Open panel B in this app</button></div>
     <div class="qrs">
-      <div class="qr"><div>CONTROL PANEL</div><img id="qrController" alt="" /><div class="note">Scan on any phone, tablet or computer. It has a tab for each display.</div></div>
+      <div class="qr"><div>PANEL: DISPLAY A</div><img id="qrControllerA" alt="" /><div class="note">Scan on any phone, tablet or computer. Controls display A only.</div></div>
+      <div class="qr"><div>PANEL: DISPLAY B</div><img id="qrControllerB" alt="" /><div class="note">Scan on a second device (or the same one in another tab). Controls display B only.</div></div>
+    </div>
+    <div class="qrs">
       <div class="qr"><div>CAMERA</div><img id="qrCamera" alt="" /><div class="note">Scan on the device you want as the camera. It feeds every open display.</div></div>
     </div>
-    <div class="link" id="urlController"></div>
+    <div class="link" id="urlControllerA"></div>
+    <div class="link" id="urlControllerB"></div>
     <div class="link" id="urlCamera"></div>
 
     <h2>MADMAPPER FIXES</h2>
@@ -117,9 +122,11 @@
         // don't rebuild the cards while a dropdown is open
         if (!(document.activeElement && document.activeElement.tagName === 'SELECT')) renderOutputs(s);
         $('code').textContent = s.shared.pairingCode;
-        $('qrController').src = s.qr.controller;
+        $('qrControllerA').src = s.qr.controllerA;
+        $('qrControllerB').src = s.qr.controllerB;
         $('qrCamera').src = s.qr.camera;
-        $('urlController').textContent = s.urls.controller;
+        $('urlControllerA').textContent = s.urls.controllerA;
+        $('urlControllerB').textContent = s.urls.controllerB;
         $('urlCamera').textContent = s.urls.camera;
         $('swapRB').checked = s.shared.swapRB;
         $('flipV').checked = s.shared.flipV;
@@ -129,7 +136,8 @@
       $('swapRB').addEventListener('change', () => controlApi.setShared({ swapRB: $('swapRB').checked }).then(render));
       $('flipV').addEventListener('change', () => controlApi.setShared({ flipV: $('flipV').checked }).then(render));
       $('newCode').addEventListener('click', () => controlApi.action('newCode').then(render));
-      $('openHere').addEventListener('click', () => controlApi.action('openController'));
+      $('openHereA').addEventListener('click', () => controlApi.action('openController', 0));
+      $('openHereB').addEventListener('click', () => controlApi.action('openController', 1));
       $('savePages').addEventListener('click', () => controlApi.setShared({ pagesBase: $('pagesBase').value.trim() }).then(render));
 
       controlApi.onState(render);

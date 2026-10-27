@@ -79,8 +79,12 @@ let CODE = (location.hash.slice(1) || DEFAULT_CODE).toUpperCase();
 let which = 'A';
 if (CODE.endsWith('-B')) {
   CODE = CODE.slice(0, -2);
-  which = 'B'; // opened with the address of display B: start on it
+  which = 'B'; // opened with the address of display B
 }
+// Each control panel runs ONE display: the address with the plain code is display A's panel, the one ending in -B is
+// display B's. Open both (on two devices, or two windows) to control both displays at the same time.
+const ONLY = which;
+document.title = `Face Projection - Display ${ONLY} control panel`;
 const idOf = (key) => 'faceproj-' + CODE + (key === 'B' ? '-B' : '');
 // everything we know about each display
 const rec = {
@@ -107,7 +111,7 @@ function setup() {
   const root = select('main');
 
   infoLine = createDiv('Connecting...').class('info').parent(root);
-  tabs = createDiv().class('tabs').parent(root);
+  tabs = createDiv().class('tabs').parent(root); // (kept hidden: there is one panel per display)
   tabBtns = ['A', 'B'].map((k) => {
     const b = createButton(`Display ${k}`).class('btn tab').parent(tabs);
     tap(b, () => showDisplay(k));
@@ -247,13 +251,13 @@ function showDisplay(key) {
 function render() {
   sync();
   // the tabs only appear once a second display has shown up
-  tabs.style('display', rec.B.seen || which === 'B' ? 'grid' : 'none');
+  tabs.style('display', 'none');
   ['A', 'B'].forEach((k, i) => {
     tabBtns[i].html(rec[k].linked ? `Display ${k}` : `Display ${k} (off)`);
     tabBtns[i].style('opacity', k === which ? '1' : '0.4');
   });
 
-  const name = rec.B.seen || which === 'B' ? `display ${which}` : 'the sketch';
+  const name = `display ${ONLY}`;
   if (linked) {
     const loading = state && state.loading && state.loading.length ? ` - loading ${state.loading.join(' + ')} model...` : '';
     infoLine.html(`Connected to ${name}` + loading);
@@ -308,16 +312,14 @@ function peerOptions() {
 function start() {
   peer = new Peer(undefined, peerOptions());
   peer.on('open', () => {
-    linkTo('A');
-    linkTo('B');
+    linkTo(ONLY);
   });
   peer.on('disconnected', () => peer.reconnect());
   peer.on('error', (err) => {
     if (err.type === 'peer-unavailable') {
       // the message names the display we could not reach
-      const key = /-B\s*$/.test(err.message || '') ? 'B' : 'A';
-      rec[key].problem = key === 'B' ? 'Display B is not open. Turn it on in the app.' : "Can't find the sketch. Is sketch.html open on the laptop?";
-      retry(key);
+      rec[ONLY].problem = ONLY === 'B' ? 'Display B is not open. Turn it on in the app.' : "Can't find the sketch. Is sketch.html open on the laptop?";
+      retry(ONLY);
     } else {
       rec[which].problem = 'Connection problem: ' + err.type;
     }
@@ -337,7 +339,7 @@ function linkTo(key) {
     r.linked = true;
     r.seen = true;
     r.problem = '';
-    c.send({ type: 'cmd', cmd: { name: 'viewing', on: key === which } });
+    c.send({ type: 'cmd', cmd: { name: 'viewing', on: true } });
     render();
   });
   c.on('data', (m) => {

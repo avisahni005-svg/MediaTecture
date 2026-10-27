@@ -2,7 +2,7 @@
 //   - up to TWO output windows (display A and display B). Each is its own sketch with its own controls, its own
 //     camera and its own MadMapper (Syphon) source, and each can sit on a different screen.
 //   - a CONTROL window picks the screen / MadMapper output for each display and shows codes (QR) to connect other devices:
-//       any device can be the control panel (controller.html, one panel with a tab per display)
+//       any device can be the control panel (controller.html: one panel per display, open both to control both at once)
 //       and any device can be the camera (camera.html, it feeds every open display)
 const { app, BrowserWindow, Menu, screen, ipcMain, session, systemPreferences } = require('electron');
 const path = require('path');
@@ -222,15 +222,27 @@ function createControlWindow() {
   controlWin.on('closed', () => (controlWin = null));
 }
 
-function openControlPanelHere() {
+// a control panel for ONE display, in its own window (open both to control both displays at once)
+const panelWins = [null, null];
+function openControlPanelHere(i = 0) {
+  if (panelWins[i] && !panelWins[i].isDestroyed()) {
+    panelWins[i].show();
+    panelWins[i].focus();
+    return;
+  }
   const win = new BrowserWindow({
     width: 1024,
     height: 768,
-    title: 'Face Projection Control Panel',
+    x: 60 + i * 80,
+    y: 60 + i * 60,
+    title: `Face Projection Control Panel: Display ${LABELS[i]}`,
     backgroundColor: '#111111',
     webPreferences: { contextIsolation: true, nodeIntegration: false },
   });
-  win.loadFile(path.join(__dirname, 'renderer', 'controller.html'), { hash: settings.pairingCode });
+  win.on('page-title-updated', (e) => e.preventDefault()); // keep the title that says which display it controls
+  win.on('closed', () => (panelWins[i] = null));
+  panelWins[i] = win;
+  win.loadFile(path.join(__dirname, 'renderer', 'controller.html'), { hash: codeFor(i) });
 }
 
 // ---- MadMapper output through Syphon (macOS only): one source per display ----
@@ -352,11 +364,13 @@ function moveOutputToDisplay(i) {
 async function buildState() {
   const pages = settings.pagesBase.endsWith('/') ? settings.pagesBase : settings.pagesBase + '/';
   const urls = {
-    controller: `${pages}controller.html#${settings.pairingCode}`,
+    controllerA: `${pages}controller.html#${codeFor(0)}`,
+    controllerB: `${pages}controller.html#${codeFor(1)}`,
     camera: `${pages}camera.html#${settings.pairingCode}`,
   };
   const qr = {
-    controller: await QRCode.toDataURL(urls.controller, { margin: 1, width: 240 }),
+    controllerA: await QRCode.toDataURL(urls.controllerA, { margin: 1, width: 240 }),
+    controllerB: await QRCode.toDataURL(urls.controllerB, { margin: 1, width: 240 }),
     camera: await QRCode.toDataURL(urls.camera, { margin: 1, width: 240 }),
   };
   const primary = screen.getPrimaryDisplay().id;
@@ -399,7 +413,7 @@ ipcMain.handle('control:setOutput', async (_e, index, patch) => {
 });
 ipcMain.handle('control:action', async (_e, name, index) => {
   if (name === 'newCode') applyShared({ pairingCode: randomCode() });
-  if (name === 'openController') openControlPanelHere();
+  if (name === 'openController') openControlPanelHere(index || 0);
   if (name === 'reloadOutput' && settings.outputs[index].enabled) createOutputWindow(index);
   if (name === 'showOutput') showOutput(index);
   return buildState();
@@ -444,7 +458,8 @@ function buildMenu() {
         outputMenu(0),
         outputMenu(1),
         { type: 'separator' },
-        { label: 'Open Control Panel in This App', click: openControlPanelHere },
+        { label: 'Open Control Panel for Display A', click: () => openControlPanelHere(0) },
+        { label: 'Open Control Panel for Display B', click: () => openControlPanelHere(1) },
       ],
     },
     { role: 'editMenu' },
