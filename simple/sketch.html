@@ -89,11 +89,12 @@ const smooth = {}; // smoothed position per person+feature+point, keyed 'personI
 const sk = (pid, idx, k) => `${pid}:${idx}:${k}`;
 const candidates = []; // every face seen lately, including brand-new ones not yet trusted: { id, x, y, face, lastSeen, seen }
 const tracks = []; // the people we trust (seen in several detections in a row): the ones everything else uses
-let lastFaces = null;  // the detection result we last processed, so each result is only counted once
+let lastFaces = null;
+let poseFaceSeen = 0;  // which pose result we last built rough faces from  // the detection result we last processed, so each result is only counted once
 // the two optional body models (loaded and run only while Body Trace is on)
 const MODELS = {
-  pose:  { model: null, ready: false, running: false, busy: false, last: 0, gen: 0, results: [], version: 0 }, // where the arms and legs are
-  hands: { model: null, ready: false, running: false, busy: false, last: 0, gen: 0, results: [], version: 0 }, // where the hands and fingers are
+  pose:  { model: null, ready: false, running: false, busy: false, last: 0, at: 0, n: 0, gen: 0, results: [], version: 0 }, // where the arms and legs are
+  hands: { model: null, ready: false, running: false, busy: false, last: 0, at: 0, n: 0, gen: 0, results: [], version: 0 }, // where the hands and fingers are
 };
 let seenVersion = { pose: 0, hands: 0 }; // which model result each person was last matched against
 let wantModels = new Set();               // which extra models are needed right now (Body Trace only)
@@ -175,9 +176,10 @@ function draw() {
   // the features in play (for Body Trace / Screen Trace with nothing highlighted: all of them)
   const inUse = (bodyTrace || screenTrace) && selected.size === 0 ? new Set(FEATURES.map((_, i) => i)) : selected;
 
-  // the pose and hand models only run for Body Trace, where they make the outline follow arms, legs and fingers
+  // the pose model always runs (it finds people too far away or too dim for the face model, and backs the face model up);
+  // the hand model only runs for Body Trace, where they make the outline follow arms, legs and fingers
   // (and the pose model also helps find people who are too far away for the face model: it sees the whole body)
-  wantModels = new Set(bodyTrace ? ['pose', 'hands'] : candidates.length === 0 ? ['pose'] : []);
+  wantModels = new Set(bodyTrace ? ['pose', 'hands'] : ['pose']);
   syncModels();
   runFaceDetect();
 
@@ -191,11 +193,7 @@ function draw() {
       t.n = t.n || {};
       const before = t.n[idx] || 0;
       t.n[idx] = pts.length;
-      pts.forEach((p, k) => {
-        const key = sk(t.id, idx, k);
-        const prev = smooth[key];
-        smooth[key] = prev ? { x: lerp(prev.x, p.x, SMOOTHING), y: lerp(prev.y, p.y, SMOOTHING) } : { x: p.x, y: p.y };
-      });
+      pts.forEach((p, k) => smoothPoint(sk(t.id, idx, k), p));
       for (let k = pts.length; k < before; k++) delete smooth[sk(t.id, idx, k)]; // points that vanished
     }
   });
@@ -269,6 +267,32 @@ function draw() {
   maybeSendPreview(vw, vh, boxes);
 }
 
+// Glide a point toward where the tracker says it is. The tracker answers 15-30 times a second but the screen draws 60,
+// so between answers the point keeps moving at the speed it was last moving (a short, limited guess ahead), and the
+// glide is timed by the clock rather than by the frame, so motion stays smooth whatever the speed of either.
+function smoothPoint(key, p) {
+  const now = millis();
+  const prev = smooth[key];
+  if (!prev) {
+    smooth[key] = { x: p.x, y: p.y, tx: p.x, ty: p.y, vx: 0, vy: 0, tt: now };
+    return;
+  }
+  if (p.x !== prev.tx || p.y !== prev.ty) { // a new answer from the tracker
+    const dt = constrain(now - prev.tt, 16, 250);
+    const vx = constrain((p.x - prev.tx) / dt, -3, 3); // pixels per millisecond
+    const vy = constrain((p.y - prev.ty) / dt, -3, 3);
+    prev.vx = lerp(prev.vx, vx, 0.5);
+    prev.vy = lerp(prev.vy, vy, 0.5);
+    prev.tx = p.x;
+    prev.ty = p.y;
+    prev.tt = now;
+  }
+  const ahead = Math.min(now - prev.tt, 90);
+  const k = 1 - Math.pow(1 - SMOOTHING, constrain(deltaTime, 4, 100) / 16.7);
+  prev.x = lerp(prev.x, prev.tx + prev.vx * ahead, k);
+  prev.y = lerp(prev.y, prev.ty + prev.vy * ahead, k);
+}
+
 // ---- body trace ----
 
 // Switch Body Trace on or off. The body model is big, so it is only loaded (and only runs) while it is on.
@@ -309,7 +333,7 @@ function feedBodyModel(vw, vh) {
     segCanvas.width = w;
     segCanvas.height = h;
   }
-  segCanvas.getContext('2d').drawImage(video.elt, segRect.sx, segRect.sy, segRect.sw, segRect.sh, 0, 0, w, h);
+  drawCrop(segCanvas, segRect);
   if (bodySegReady && !bodySegBusy && millis() - bodySegLast >= SEG_GAP) {
     bodySegRunning = true;
     bodySegBusy = true;
@@ -694,12 +718,16 @@ function ensureModel(kind) {
 // the whole picture, so a small or far away person fills more of what the model sees. One detection at a time.
 function runModelOnCrop(kind) {
   const m = MODELS[kind];
-  if (m.busy || typeof m.model.detect !== 'function' || millis() - m.last < MODEL_GAP[kind]) return;
+  // when faces are being found fine the pose model only needs to keep watch, so it runs less often
+  const calm = kind === 'pose' && !bodyTrace && candidates.some((t) => millis() - (t.realAt || 0) < 400);
+  if (m.busy || typeof m.model.detect !== 'function' || millis() - m.last < (calm ? 140 : MODEL_GAP[kind])) return;
   m.last = millis();
   const vw = video.elt.videoWidth;
   const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
-  const r = (bodyTrace && segRect) || { sx: 0, sy: 0, sw: vw, sh: vh };
+  // look at the crop around the people we know (they fill more of what the model sees), and now and then at everything
+  const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
+  const r = (bodyTrace && segRect) || (kind === 'pose' && tracks.length && ++m.n % 6 !== 0 ? bodyCropRect(vw, vh) : whole);
   const w = MODEL_SIZE[kind];
   const h = Math.max(16, Math.round((w * r.sh) / r.sw));
   if (!modelCanvas[kind]) modelCanvas[kind] = document.createElement('canvas');
@@ -708,7 +736,7 @@ function runModelOnCrop(kind) {
     cv.width = w;
     cv.height = h;
   }
-  cv.getContext('2d').drawImage(video.elt, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
+  drawCrop(cv, r);
   m.busy = true;
   const gen = m.gen; // a camera change in the meantime makes this answer stale
   const p = m.model.detect(cv, (results) => {
@@ -717,6 +745,7 @@ function runModelOnCrop(kind) {
     const kx = r.sw / w;
     const ky = r.sh / h;
     // put the points back in whole-picture coordinates
+    m.at = millis();
     m.results = (results || []).map((o) => ({ ...o, keypoints: (o.keypoints || []).map((k) => ({ ...k, x: r.sx + k.x * kx, y: r.sy + k.y * ky })) }));
     m.version++;
   });
@@ -853,6 +882,36 @@ function updatePeople() {
           best = t;
         }
       }
+      if (!best) {
+        best = { id: nextPersonId++, seen: 0 };
+        candidates.push(best);
+      }
+      Object.assign(best, { x: nose.x, y: nose.y, face, lastSeen: millis(), realAt: millis() });
+      best.seen++;
+      used.add(best);
+    }
+  }
+
+  // The pose model sees whole bodies from further away and in dimmer light than the face model sees faces. Where it finds
+  // a head the face model has not been finding, build a rougher face from the pose points (eyes, nose) so tracking holds.
+  if (MODELS.pose.version !== poseFaceSeen) {
+    poseFaceSeen = MODELS.pose.version;
+    const used = new Set();
+    for (const pose of MODELS.pose.results) {
+      const face = faceFromPose(pose);
+      if (!face) continue;
+      const nose = face.keypoints[1];
+      let best = null;
+      let bestDist = maxMove;
+      for (const t of candidates) {
+        if (used.has(t)) continue;
+        const d = dist(nose.x, nose.y, t.x, t.y);
+        if (d < bestDist) {
+          bestDist = d;
+          best = t;
+        }
+      }
+      if (best && millis() - (best.realAt || 0) < 500) continue; // the face model has this person: its answer is better
       if (!best) {
         best = { id: nextPersonId++, seen: 0 };
         candidates.push(best);
@@ -1042,6 +1101,7 @@ function startSource(makeVideo, activeId) {
   tracks.length = 0; // everyone is re-detected from the new camera
   candidates.length = 0;
   lastFaces = null;
+  faceRun.lock = null;
   resetBodyModels();
   peopleKey = '';
   clearSmooth();
@@ -1057,8 +1117,6 @@ function startSource(makeVideo, activeId) {
 
   const startTracking = () => {
     if (vid !== video) return; // the user already switched to another camera
-    // we hand the model a different crop each time, so it must not assume this picture follows the last one
-    faceMesh.runtimeConfig = { ...faceMesh.runtimeConfig, staticImageMode: true };
     faceRun.model = faceMesh;
     faceRun.gen++;
     faceRun.busy = false;
@@ -1071,40 +1129,123 @@ function startSource(makeVideo, activeId) {
 }
 
 // make the video element's width/height equal the picture's real size (the face tracker measures against it)
-// ---- face finding on zoomed-in crops ----
-// A face far from the camera is only a few pixels wide in the whole picture, which the face model misses. So the face
-// model looks at a crop around the people it already knows (they fill more of what it sees), and when nobody is found
-// yet it sweeps through zoomed-in views of the picture. Every few runs it looks at everything, to spot newcomers.
-const faceRun = { model: null, busy: false, gen: 0, n: 0, canvas: null };
-const FACE_SWEEP = [null, [0.5, 0.5, 0.6], [0.25, 0.5, 0.5], [0.75, 0.5, 0.5], [0.5, 0.5, 0.3], [0.5, 0.35, 0.3]]; // [center x, center y, side] as fractions of the picture; null = all of it
+// ---- finding faces: tight crops, pose-guided, with help in low light ----
+// The face model shrinks whatever it is given to about 128x128 pixels before it looks for faces. A face that is ~70 pixels
+// tall in a 1280-wide picture becomes a few pixels, and it finds nothing (that is why you used to have to come close).
+// So it almost never looks at the whole picture: it looks at a crop around each known person (kept still while they stay
+// inside it, which lets the model track instead of searching again), or around where the pose model sees a head, and now
+// and then at everything to spot newcomers. While nobody is known it sweeps through zoomed-in views.
+const faceRun = { model: null, busy: false, gen: 0, n: 0, canvas: null, lock: null, lastRect: null };
+const FACE_SWEEP = [null, [0.5, 0.5, 0.6], [0.5, 0.5, 0.4], [0.3, 0.5, 0.4], [0.7, 0.5, 0.4], [0.5, 0.4, 0.3], [0.5, 0.65, 0.3], [0.2, 0.5, 0.5], [0.8, 0.5, 0.5]]; // [center x, center y, side] as fractions of the picture; null = all of it
 
+// low light: how much to brighten the crops the models look at (they find faces in dim, noisy pictures much less well)
+const light = { gain: 1, at: 0, probe: null };
+function updateLight() {
+  const now = millis();
+  if (now - light.at < 400 || !video || !video.elt.videoWidth) return;
+  light.at = now;
+  if (!light.probe) {
+    light.probe = document.createElement('canvas');
+    light.probe.width = 32;
+    light.probe.height = 18;
+  }
+  const g = light.probe.getContext('2d', { willReadFrequently: true });
+  g.drawImage(video.elt, 0, 0, 32, 18);
+  const d = g.getImageData(0, 0, 32, 18).data;
+  let sum = 0;
+  for (let i = 0; i < d.length; i += 4) sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+  const mean = sum / (d.length / 4);
+  const want = constrain(120 / Math.max(mean, 12), 1, 4);
+  light.gain = lerp(light.gain, want, 0.4);
+}
+
+// copy part of the camera picture into a small canvas for a model, brightened and softened when the room is dark
+function drawCrop(cv, r) {
+  const g = cv.getContext('2d');
+  g.imageSmoothingQuality = 'high';
+  const dim = light.gain > 1.2;
+  g.filter = dim ? `brightness(${light.gain.toFixed(2)}) contrast(1.15)${light.gain > 1.6 ? ' blur(0.8px)' : ''}` : 'none';
+  g.drawImage(video.elt, r.sx, r.sy, r.sw, r.sh, 0, 0, cv.width, cv.height);
+  g.filter = 'none';
+}
+
+// heads the pose model sees right now: [{ cx, cy, side }]
+function poseHeads() {
+  const P = MODELS.pose;
+  if (!P.running || millis() - P.at > 700) return [];
+  return P.results.map(headFromPose).filter(Boolean);
+}
+
+// the part of the picture the face model looks at this time
 function faceCropRect(vw, vh) {
   const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
   const m = Math.min(vw, vh);
   const n = faceRun.n++;
+  const around = (cx, cy, side) => {
+    side = Math.min(side, m);
+    return { sx: constrain(cx - side / 2, 0, vw - side), sy: constrain(cy - side / 2, 0, vh - side), sw: side, sh: side };
+  };
+  const heads = poseHeads();
+
   if (candidates.length === 0) {
-    // the pose model sees whole bodies from much further away than the face model sees faces: look where it found a head
-    const heads = MODELS.pose.results.map(headFromPose).filter(Boolean);
-    if (heads.length && n % 3 !== 0) {
+    faceRun.lock = null;
+    if (heads.length && n % 4 !== 3) {
       const h = heads[n % heads.length];
-      const side = Math.min(h.side, m);
-      return { sx: constrain(h.cx - side / 2, 0, vw - side), sy: constrain(h.cy - side / 2, 0, vh - side), sw: side, sh: side };
+      return around(h.cx, h.cy, h.side);
     }
     const v = FACE_SWEEP[n % FACE_SWEEP.length];
-    if (!v) return whole;
-    const side = v[2] * m;
-    return { sx: constrain(v[0] * vw - side / 2, 0, vw - side), sy: constrain(v[1] * vh - side / 2, 0, vh - side), sw: side, sh: side };
+    return v ? around(v[0] * vw, v[1] * vh, v[2] * m) : whole;
   }
-  if (n % 5 === 0) return whole;
+
+  if (n % 12 === 0) return whole; // newcomers, who might be anywhere
+  if (n % 12 === 6) {
+    // someone the pose model sees who is not one of our people yet
+    const fresh = heads.find((h) => candidates.every((t) => dist(h.cx, h.cy, t.x, t.y) > Math.max(0.6 * h.side, 2 * faceBox(t.face).w)));
+    if (fresh) return around(fresh.cx, fresh.cy, fresh.side);
+  }
+
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity, big = 0;
   for (const t of candidates) {
     const b = faceBox(t.face);
     x0 = Math.min(x0, b.x); y0 = Math.min(y0, b.y); x1 = Math.max(x1, b.x + b.w); y1 = Math.max(y1, b.y + b.h);
     big = Math.max(big, b.w, b.h);
   }
-  const side = Math.max(Math.max(x1 - x0, y1 - y0) + 5 * big, 160);
-  if (side >= 0.8 * m) return whole;
-  return { sx: constrain((x0 + x1) / 2 - side / 2, 0, vw - side), sy: constrain((y0 + y1) / 2 - side / 2, 0, vh - side), sw: side, sh: side };
+  const need = Math.max(Math.max(x1 - x0, y1 - y0) + 5 * big, 160);
+  if (need >= 0.8 * m) {
+    faceRun.lock = null;
+    return whole;
+  }
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const L = faceRun.lock;
+  // keep the same crop while everyone stays well inside it and it is still about the right size
+  const fits = L && x0 > L.sx && x1 < L.sx + L.sw && y0 > L.sy && y1 < L.sy + L.sh
+    && cx > L.sx + 0.25 * L.sw && cx < L.sx + 0.75 * L.sw && cy > L.sy + 0.25 * L.sh && cy < L.sy + 0.75 * L.sh
+    && need < L.sw * 1.1 && need > L.sw * 0.45;
+  if (!fits) faceRun.lock = around(cx, cy, need * 1.25);
+  return faceRun.lock;
+}
+
+// A rough face built from a pose result (the eyes and nose; eyebrows and mouth are placed by proportion), or null.
+function faceFromPose(pose) {
+  const k = {};
+  for (const p of pose.keypoints || []) k[p.name] = p;
+  const ok = (name) => k[name] && k[name].confidence >= 0.35;
+  if (!ok('nose') || !ok('left_eye') || !ok('right_eye')) return null;
+  const d = dist(k.left_eye.x, k.left_eye.y, k.right_eye.x, k.right_eye.y); // the width between the eyes sets the scale
+  if (d < 3) return null;
+  const at = (x, y) => ({ x, y, centerX: x, centerY: y });
+  const nose = k.nose;
+  return {
+    rough: true,
+    keypoints: [at(nose.x, nose.y), at(nose.x, nose.y)], // the code reads index 1 as the nose tip
+    box: { xMin: nose.x - 1.3 * d, xMax: nose.x + 1.3 * d, yMin: Math.min(k.left_eye.y, k.right_eye.y) - 1.4 * d, yMax: nose.y + 1.8 * d },
+    leftEye: at(k.left_eye.x, k.left_eye.y),
+    rightEye: at(k.right_eye.x, k.right_eye.y),
+    leftEyebrow: at(k.left_eye.x, k.left_eye.y - 0.5 * d),
+    rightEyebrow: at(k.right_eye.x, k.right_eye.y - 0.5 * d),
+    lips: at(nose.x, nose.y + 0.85 * d),
+  };
 }
 
 // where a person's head is, from a pose result: { cx, cy, side } = a square that comfortably holds the head (or null)
@@ -1147,7 +1288,11 @@ function runFaceDetect() {
   const vw = video.elt.videoWidth; // 0 until the camera picture really arrives
   const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
+  updateLight();
   const r = faceCropRect(vw, vh);
+  const fresh = r !== faceRun.lastRect; // a different crop than last time: the model must search again instead of tracking
+  faceRun.lastRect = r;
+  model.runtimeConfig = { ...model.runtimeConfig, staticImageMode: fresh };
   const w = r.sw === vw ? 640 : 320;
   const h = Math.max(16, Math.round((w * r.sh) / r.sw));
   if (!faceRun.canvas) faceRun.canvas = document.createElement('canvas');
@@ -1156,7 +1301,7 @@ function runFaceDetect() {
     cv.width = w;
     cv.height = h;
   }
-  cv.getContext('2d').drawImage(video.elt, r.sx, r.sy, r.sw, r.sh, 0, 0, w, h);
+  drawCrop(cv, r);
   faceRun.busy = true;
   const gen = faceRun.gen;
   const kx = r.sw / w;
@@ -1179,7 +1324,7 @@ function syncVideoSize() {
 
 // a camera plugged into this computer (null = the default one)
 function startCamera(deviceId) {
-  const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 } }, audio: false }; // wide picture for full-screen use
+  const constraints = { video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } }, audio: false }; // wide picture for full-screen use
   if (deviceId) constraints.video.deviceId = { exact: deviceId };
   startSource(() => {
     const vid = createCapture(constraints, listCameras);
