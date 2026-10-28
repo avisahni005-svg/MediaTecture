@@ -268,22 +268,38 @@ function attachSyphon(i) {
     return;
   }
   out.syphonMessage = `Publishing "${SYPHON_NAMES[i]}". In MadMapper pick it as a Syphon input.`;
-  out.win.webContents.beginFrameSubscription(false, (image) => {
+  // Sending the picture to Syphon is expensive (a full-size copy of every frame), so it is kept cheap:
+  //  - at most ~30 pictures a second, and never queue up behind a slow one
+  //  - the picture is sent at the window's normal size, not the doubled size of a Retina screen (a quarter of the data)
+  //  - red/blue swapping is done four bytes at a time, in place
+  let lastSent = 0;
+  out.win.webContents.beginFrameSubscription(true, (image) => {
     if (!out.syphonServer) return;
-    const { width, height } = image.getSize();
-    if (!width || !height) return;
-    out.syphonSize = { width, height };
-    const bmp = image.toBitmap(); // BGRA, top row first
-    let data = new Uint8ClampedArray(bmp.buffer, bmp.byteOffset, bmp.byteLength);
-    if (settings.swapRB) {
-      data = Uint8ClampedArray.from(data);
-      for (let p = 0; p < data.length; p += 4) {
-        const t = data[p];
-        data[p] = data[p + 2];
-        data[p + 2] = t;
-      }
-    }
+    const now = Date.now();
+    if (now - lastSent < 33) return;
+    lastSent = now;
     try {
+      const scale = screen.getDisplayMatching(out.win.getBounds()).scaleFactor || 1;
+      const size = image.getSize();
+      if (!size.width || !size.height) return;
+      if (scale > 1) image = image.resize({ width: Math.round(size.width / scale), height: Math.round(size.height / scale), quality: 'good' });
+      const { width, height } = image.getSize();
+      out.syphonSize = { width, height };
+      const bmp = image.toBitmap(); // BGRA, top row first (a fresh copy, so it can be changed in place)
+      if (settings.swapRB && bmp.byteOffset % 4 === 0) {
+        const px = new Uint32Array(bmp.buffer, bmp.byteOffset, bmp.length >> 2);
+        for (let p = 0; p < px.length; p++) {
+          const v = px[p];
+          px[p] = (v & 0xff00ff00) | ((v & 0xff) << 16) | ((v >>> 16) & 0xff); // little-endian: swap the first and third byte
+        }
+      } else if (settings.swapRB) {
+        for (let p = 0; p + 3 < bmp.length; p += 4) {
+          const t = bmp[p];
+          bmp[p] = bmp[p + 2];
+          bmp[p + 2] = t;
+        }
+      }
+      const data = new Uint8ClampedArray(bmp.buffer, bmp.byteOffset, bmp.byteLength);
       out.syphonServer.publishImageData(data, { x: 0, y: 0, width, height }, { width, height }, settings.flipV);
     } catch (e) {
       out.syphonMessage = 'Syphon error: ' + e.message;

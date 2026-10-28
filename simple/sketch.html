@@ -180,6 +180,7 @@ function draw() {
   // the hand model only runs for Body Trace, where they make the outline follow arms, legs and fingers
   // (and the pose model also helps find people who are too far away for the face model: it sees the whole body)
   wantModels = new Set(bodyTrace ? ['pose', 'hands'] : ['pose']);
+  pickInference();
   syncModels();
   runFaceDetect();
 
@@ -334,13 +335,14 @@ function feedBodyModel(vw, vh) {
     segCanvas.height = h;
   }
   drawCrop(segCanvas, segRect);
-  if (bodySegReady && !bodySegBusy && millis() - bodySegLast >= SEG_GAP) {
+  const ticket = bodySegReady && !bodySegBusy ? takeTurn('seg') : 0;
+  if (ticket) {
     bodySegRunning = true;
     bodySegBusy = true;
-    bodySegLast = millis();
     const sent = { ...segRect }; // the part of the picture this answer will describe
     const done = (result) => {
       bodySegBusy = false;
+      endTurn(ticket);
       if (!bodyTrace) return;
       if (result && result.maskImageData) {
         const fresh = result.maskImageData;
@@ -356,7 +358,7 @@ function feedBodyModel(vw, vh) {
       }
     };
     const pr = bodySeg.detect(segCanvas, done);
-    if (pr && typeof pr.catch === 'function') pr.catch(() => (bodySegBusy = false));
+    if (pr && typeof pr.catch === 'function') pr.catch(() => { bodySegBusy = false; endTurn(ticket); });
   }
 }
 
@@ -450,6 +452,12 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
   const featureIds = [...byFeature.keys()];
   const reach = T * 0.3;
   let drawn = 0;
+  // Tiles are drawn plain and mirrored through one flip of the whole canvas, and the colour filter is applied ONCE over
+  // everything afterwards (the space between tiles is black, which the filters leave black). That is far cheaper than
+  // filtering every tile on its own.
+  ctx.save();
+  ctx.translate(width, 0);
+  ctx.scale(-1, 1);
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
@@ -477,9 +485,22 @@ function drawMosaic(ctx, vw, vh, view, inUse) {
       const at = smooth[sk(cell.pid, cell.fi, cell.k)];
       if (!at) continue;
       const patch = zoomedIn(squareRect(vw, vh, at, boxSide(vw, vh, FEATURES[cell.fi].size)));
-      drawFiltered(ctx, patch, c * T + 1, r * T + 1, T - 2, T - 2, fxIn);
+      ctx.drawImage(video.elt, patch.sx, patch.sy, patch.sw, patch.sh, width - (c * T + 1) - (T - 2), r * T + 1, T - 2, T - 2);
       drawn++;
     }
+  }
+  ctx.restore();
+  if (drawn > 0 && fxIn !== 'none') {
+    ctx.save();
+    ctx.globalCompositeOperation = 'saturation';
+    ctx.fillStyle = '#000000';
+    ctx.fillRect(0, 0, width, height);
+    if (fxIn === 'duo') {
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = BTN_COLOR;
+      ctx.fillRect(0, 0, width, height);
+    }
+    ctx.restore();
   }
 
   // nothing to show yet (nothing found): show the plain camera instead of a dead black screen
@@ -718,13 +739,12 @@ function ensureModel(kind) {
 // the whole picture, so a small or far away person fills more of what the model sees. One detection at a time.
 function runModelOnCrop(kind) {
   const m = MODELS[kind];
-  // when faces are being found fine the pose model only needs to keep watch, so it runs less often
-  const calm = kind === 'pose' && !bodyTrace && candidates.some((t) => millis() - (t.realAt || 0) < 400);
-  if (m.busy || typeof m.model.detect !== 'function' || millis() - m.last < (calm ? 140 : MODEL_GAP[kind])) return;
-  m.last = millis();
+  if (m.busy || typeof m.model.detect !== 'function') return;
   const vw = video.elt.videoWidth;
   const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
+  const ticket = takeTurn(kind);
+  if (!ticket) return;
   // look at the crop around the people we know (they fill more of what the model sees), and now and then at everything
   const whole = { sx: 0, sy: 0, sw: vw, sh: vh };
   const r = (bodyTrace && segRect) || (kind === 'pose' && tracks.length && ++m.n % 6 !== 0 ? bodyCropRect(vw, vh) : whole);
@@ -741,6 +761,7 @@ function runModelOnCrop(kind) {
   const gen = m.gen; // a camera change in the meantime makes this answer stale
   const p = m.model.detect(cv, (results) => {
     m.busy = false;
+    endTurn(ticket);
     if (gen !== m.gen || !m.running) return;
     const kx = r.sw / w;
     const ky = r.sh / h;
@@ -750,7 +771,7 @@ function runModelOnCrop(kind) {
     m.version++;
   });
   // if a detection throws, let the next frame try again instead of getting stuck
-  if (p && typeof p.catch === 'function') p.catch(() => (m.busy = false));
+  if (p && typeof p.catch === 'function') p.catch(() => { m.busy = false; endTurn(ticket); });
 }
 
 // start the models something needs, stop the ones nothing needs
@@ -1129,6 +1150,57 @@ function startSource(makeVideo, activeId) {
 }
 
 // make the video element's width/height equal the picture's real size (the face tracker measures against it)
+// ---- one model at a time ----
+// The face, pose, hand and outline models all run on the same graphics chip, and each one's answer has to be read back
+// by the page. Running them at once makes them fight each other (and the drawing), and the picture gets choppy. So they
+// take turns: one at a time, the one that has waited longest first, and if the picture's frame rate drops they all slow
+// down a little (`pace`) so that drawing always keeps its share.
+const infer = { busy: false, since: 0, turn: null, token: 0, last: { face: 0, pose: 0, hands: 0, seg: 0 }, pace: 1, fps: 60, paceAt: 0 };
+
+function inferGap(name) {
+  const calm = !bodyTrace && candidates.some((t) => millis() - (t.realAt || 0) < 400);
+  const base = { face: 0, pose: calm ? 140 : MODEL_GAP.pose, hands: MODEL_GAP.hands, seg: SEG_GAP }[name];
+  return name === 'face' ? (infer.pace - 1) * 30 : base * infer.pace;
+}
+
+function inferWanted(name) {
+  if (name === 'face') return !!faceRun.model && !faceRun.busy;
+  if (name === 'seg') return bodyTrace && !screenTrace && bodySegReady && !bodySegBusy;
+  return wantModels.has(name) && MODELS[name].ready && !MODELS[name].busy && !!MODELS[name].model;
+}
+
+// once per frame, before anything starts: decide whose turn it is
+function pickInference() {
+  const now = millis();
+  infer.fps = lerp(infer.fps, frameRate(), 0.05);
+  if (now - infer.paceAt > 500) {
+    infer.paceAt = now;
+    if (infer.fps < 30) infer.pace = Math.min(4, infer.pace + 0.25);
+    else if (infer.fps > 50) infer.pace = Math.max(1, infer.pace - 0.25);
+  }
+  if (infer.busy && now - infer.since > 2000) infer.busy = false; // an answer that never came must not freeze everything
+  infer.turn = null;
+  if (infer.busy) return;
+  let best = null;
+  for (const name of ['face', 'pose', 'hands', 'seg']) {
+    if (!inferWanted(name) || now - infer.last[name] < inferGap(name)) continue;
+    if (!best || infer.last[name] < infer.last[best]) best = name;
+  }
+  infer.turn = best;
+}
+
+// a model asks to start: returns a ticket (to hand back to endTurn) or 0
+function takeTurn(name) {
+  if (infer.busy || infer.turn !== name) return 0;
+  infer.busy = true;
+  infer.turn = null;
+  infer.since = infer.last[name] = millis();
+  return ++infer.token;
+}
+function endTurn(ticket) {
+  if (ticket === infer.token) infer.busy = false;
+}
+
 // ---- finding faces: tight crops, pose-guided, with help in low light ----
 // The face model shrinks whatever it is given to about 128x128 pixels before it looks for faces. A face that is ~70 pixels
 // tall in a 1280-wide picture becomes a few pixels, and it finds nothing (that is why you used to have to come close).
@@ -1288,6 +1360,8 @@ function runFaceDetect() {
   const vw = video.elt.videoWidth; // 0 until the camera picture really arrives
   const vh = video.elt.videoHeight;
   if (!vw || !vh) return;
+  const ticket = takeTurn('face');
+  if (!ticket) return;
   updateLight();
   const r = faceCropRect(vw, vh);
   const fresh = r !== faceRun.lastRect; // a different crop than last time: the model must search again instead of tracking
@@ -1308,10 +1382,11 @@ function runFaceDetect() {
   const ky = r.sh / h;
   const p = model.detect(cv, (results) => {
     faceRun.busy = false;
+    endTurn(ticket);
     if (gen !== faceRun.gen) return; // from before a camera switch
     faces = mapToFrame(results || [], r, kx, ky);
   });
-  if (p && typeof p.catch === 'function') p.catch(() => (faceRun.busy = false));
+  if (p && typeof p.catch === 'function') p.catch(() => { faceRun.busy = false; endTurn(ticket); });
 }
 
 function syncVideoSize() {
