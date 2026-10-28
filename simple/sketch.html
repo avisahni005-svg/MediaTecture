@@ -51,14 +51,14 @@ const facePoint = (get) => (t) => {
   return p ? [{ x: p.centerX !== undefined ? p.centerX : p.x, y: p.centerY !== undefined ? p.centerY : p.y }] : [];
 };
 
+// `aspect` is the box's width : height (eyes and mouth are wide rectangles, the rest are squares). The size slider sets
+// the box's area, so a wide box has the same area as the square of that size. (The mosaic tiles are always squares.)
 // The ORDER matters: the controller refers to features by index.
 const FEATURES = [
-  { label: 'Left Eye',      size: 100, pts: facePoint((f) => f.leftEye) },
-  { label: 'Right Eye',     size: 100, pts: facePoint((f) => f.rightEye) },
-  { label: 'Left Eyebrow',  size: 110, pts: facePoint((f) => f.leftEyebrow) },
-  { label: 'Right Eyebrow', size: 110, pts: facePoint((f) => f.rightEyebrow) },
-  { label: 'Nose',          size: 90,  pts: facePoint((f) => f.keypoints[1]) },
-  { label: 'Mouth',         size: 130, pts: facePoint((f) => f.lips) },
+  { label: 'Left Eye',      size: 100, aspect: 1.8, pts: facePoint((f) => f.leftEye) },
+  { label: 'Right Eye',     size: 100, aspect: 1.8, pts: facePoint((f) => f.rightEye) },
+  { label: 'Nose',          size: 90,  aspect: 1, pts: facePoint((f) => f.keypoints[1]) },
+  { label: 'Mouth',         size: 130, aspect: 2.2, pts: facePoint((f) => f.lips) },
 ];
 
 const MIN_SIZE = 20;
@@ -212,7 +212,7 @@ function draw() {
         if (!at) continue;
         const fromId = (perms[idx] && perms[idx][t.id]) || t.id;
         const from = smooth[sk(fromId, idx, k)] || at;
-        boxes.push({ at, from, side, label: f.label });
+        boxes.push({ at, from, side, aspect: f.aspect || 1, label: f.label });
       }
     }
   });
@@ -230,9 +230,9 @@ function draw() {
   if (fullView || selected.size === 0) {
     drawFiltered(ctx, view.src, 0, 0, width, height, fxOut);
     for (const b of boxes) {
-      const d = view.toCanvas(squareRect(vw, vh, b.at, b.side));
+      const d = view.toCanvas(aspectRect(vw, vh, b.at, b.side, b.aspect));
       // redraw the box on top so the outside filter never touches it
-      drawFiltered(ctx, zoomedIn(squareRect(vw, vh, b.from, b.side)), d.x, d.y, d.w, d.h, fxIn);
+      drawFiltered(ctx, zoomedIn(aspectRect(vw, vh, b.from, b.side, b.aspect)), d.x, d.y, d.w, d.h, fxIn);
       noFill();
       stroke(BTN_COLOR);
       strokeWeight(2);
@@ -666,17 +666,18 @@ function drawPreview(vw, vh, boxes, ph) {
 
   const k = PREVIEW / vw;
   for (const b of boxes) {
-    const r = squareRect(vw, vh, b.at, b.side);
+    const r = aspectRect(vw, vh, b.at, b.side, b.aspect);
     // mirror x to match the flipped preview
     const x = PREVIEW - (r.sx + r.sw) * k;
     const y = r.sy * k;
     const w = r.sw * k;
-    drawFiltered(pctx, zoomedIn(squareRect(vw, vh, b.from, b.side)), x, y, w, w, fxIn);
+    const h = r.sh * k;
+    drawFiltered(pctx, zoomedIn(aspectRect(vw, vh, b.from, b.side, b.aspect)), x, y, w, h, fxIn);
     preview.noFill();
     preview.stroke(BTN_COLOR);
     preview.strokeWeight(2);
-    preview.rect(x, y, w, w);
-    if (showLabels) drawLabel(pctx, b.label, x + w / 2, y + w / 2, 11);
+    preview.rect(x, y, w, h);
+    if (showLabels) drawLabel(pctx, b.label, x + w / 2, y + h / 2, 11);
   }
 }
 
@@ -1030,14 +1031,36 @@ function toggleFeature(idx) {
 
 // one random feature, a random zoom, a random inside filter and labels on or off
 function randomize() {
-  const next = floor(random(FEATURES.length));
+  // Full View on, a few features picked at random, each with a random box size, then a random zoom. Some rolls are set up
+  // as funny ones: a huge nose and not much zoom (a big head on a small body), or medium-big eyes and mouth.
+  const NOSE = FEATURES.findIndex((f) => f.label === 'Nose');
+  const MOUTH = FEATURES.findIndex((f) => f.label === 'Mouth');
+  const sizeIn = (lo, hi) => round(random(lo, hi));
   selected.clear();
   clearSmooth();
-  selected.add(next);
-  current = next;
-  zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
+  const roll = random();
+  let picks;
+  if (roll < 0.25) {
+    picks = [[NOSE, sizeIn(230, MAX_SIZE)]];
+    zoom = round(random(1.4, 2.2) * 10) / 10;
+  } else if (roll < 0.5) {
+    picks = [[0, sizeIn(150, 230)], [1, sizeIn(150, 230)], [MOUTH, sizeIn(160, 260)]];
+    zoom = round(random(1.2, 2) * 10) / 10;
+  } else {
+    const count = random() < 0.5 ? 1 : random() < 0.7 ? 2 : 3;
+    const pool = FEATURES.map((_, i) => i);
+    picks = [];
+    for (let i = 0; i < count; i++) picks.push([pool.splice(floor(random(pool.length)), 1)[0], sizeIn(50, MAX_SIZE)]);
+    zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
+  }
+  for (const [idx, size] of picks) {
+    selected.add(idx);
+    FEATURES[idx].size = constrain(size, MIN_SIZE, MAX_SIZE);
+    current = idx;
+  }
+  fullView = true;
   fxIn = random(MODES);
-  showLabels = random() < 0.5;
+  showLabels = random() < 0.25;
   shuffleFeatures();
 }
 
@@ -1312,7 +1335,7 @@ function faceCropRect(vw, vh) {
   return faceRun.lock;
 }
 
-// A rough face built from a pose result (the eyes and nose; eyebrows and mouth are placed by proportion), or null.
+// A rough face built from a pose result (the eyes and nose; the mouth is placed by proportion), or null.
 function faceFromPose(pose) {
   const k = {};
   for (const p of pose.keypoints || []) k[p.name] = p;
@@ -1328,8 +1351,6 @@ function faceFromPose(pose) {
     box: { xMin: nose.x - 1.3 * d, xMax: nose.x + 1.3 * d, yMin: Math.min(k.left_eye.y, k.right_eye.y) - 1.4 * d, yMax: nose.y + 1.8 * d },
     leftEye: at(k.left_eye.x, k.left_eye.y),
     rightEye: at(k.right_eye.x, k.right_eye.y),
-    leftEyebrow: at(k.left_eye.x, k.left_eye.y - 0.5 * d),
-    rightEyebrow: at(k.right_eye.x, k.right_eye.y - 0.5 * d),
     lips: at(nose.x, nose.y + 0.85 * d),
   };
 }
