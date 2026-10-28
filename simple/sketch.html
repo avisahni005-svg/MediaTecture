@@ -51,14 +51,13 @@ const facePoint = (get) => (t) => {
   return p ? [{ x: p.centerX !== undefined ? p.centerX : p.x, y: p.centerY !== undefined ? p.centerY : p.y }] : [];
 };
 
-// `aspect` is the box's width : height (eyes and mouth are wide rectangles, the rest are squares). The size slider sets
-// the box's area, so a wide box has the same area as the square of that size. (The mosaic tiles are always squares.)
+// `aspect` is the box's width : height. All boxes are squares for now (1); set e.g. 1.8 on the eyes for wide boxes.
 // The ORDER matters: the controller refers to features by index.
 const FEATURES = [
-  { label: 'Left Eye',      size: 100, aspect: 1.8, pts: facePoint((f) => f.leftEye) },
-  { label: 'Right Eye',     size: 100, aspect: 1.8, pts: facePoint((f) => f.rightEye) },
+  { label: 'Left Eye',      size: 100, aspect: 1, pts: facePoint((f) => f.leftEye) },
+  { label: 'Right Eye',     size: 100, aspect: 1, pts: facePoint((f) => f.rightEye) },
   { label: 'Nose',          size: 90,  aspect: 1, pts: facePoint((f) => f.keypoints[1]) },
-  { label: 'Mouth',         size: 130, aspect: 2.2, pts: facePoint((f) => f.lips) },
+  { label: 'Mouth',         size: 130, aspect: 1, pts: facePoint((f) => f.lips) },
 ];
 
 const MIN_SIZE = 20;
@@ -229,7 +228,7 @@ function draw() {
   // whole camera view: when Full View is on, or when no feature is highlighted (no box)
   if (fullView || selected.size === 0) {
     drawFiltered(ctx, view.src, 0, 0, width, height, fxOut);
-    for (const b of boxes) {
+    for (const b of [...boxes].sort((a, c) => c.side - a.side)) { // biggest first, so a small box is never hidden under a big one
       const d = view.toCanvas(aspectRect(vw, vh, b.at, b.side, b.aspect));
       // redraw the box on top so the outside filter never touches it
       drawFiltered(ctx, zoomedIn(aspectRect(vw, vh, b.from, b.side, b.aspect)), d.x, d.y, d.w, d.h, fxIn);
@@ -665,7 +664,7 @@ function drawPreview(vw, vh, boxes, ph) {
   drawFiltered(pctx, { sx: 0, sy: 0, sw: vw, sh: vh }, 0, 0, PREVIEW, ph, fxOut);
 
   const k = PREVIEW / vw;
-  for (const b of boxes) {
+  for (const b of [...boxes].sort((a, c) => c.side - a.side)) {
     const r = aspectRect(vw, vh, b.at, b.side, b.aspect);
     // mirror x to match the flipped preview
     const x = PREVIEW - (r.sx + r.sw) * k;
@@ -1032,25 +1031,32 @@ function toggleFeature(idx) {
 // one random feature, a random zoom, a random inside filter and labels on or off
 function randomize() {
   // Full View on, a few features picked at random, each with a random box size, then a random zoom. Some rolls are set up
-  // as funny ones: a huge nose and not much zoom (a big head on a small body), or medium-big eyes and mouth.
+  // as funny ones: a big nose and not much zoom (a big head on a small body), or big eyes and mouth.
+  // Box sizes are worked out from how big the person's FACE is in the picture (boxes in absolute sizes covered a whole
+  // far-away person), so the same roll looks the same whether someone is close or far.
   const NOSE = FEATURES.findIndex((f) => f.label === 'Nose');
   const MOUTH = FEATURES.findIndex((f) => f.label === 'Mouth');
-  const sizeIn = (lo, hi) => round(random(lo, hi));
+  let faceW = 110; // a face's width in box-size units, if nobody is in view
+  if (video && video.elt.videoWidth && tracks.length) {
+    const avg = tracks.reduce((a, t) => a + faceBox(t.face).w, 0) / tracks.length;
+    faceW = (avg * 800) / Math.min(video.elt.videoWidth, video.elt.videoHeight);
+  }
+  const rel = (lo, hi) => round(faceW * random(lo, hi));
   selected.clear();
   clearSmooth();
   const roll = random();
   let picks;
-  if (roll < 0.25) {
-    picks = [[NOSE, sizeIn(230, MAX_SIZE)]];
+  if (roll < 0.3) {
+    picks = [[NOSE, rel(0.9, 1.4)]];
     zoom = round(random(1.4, 2.2) * 10) / 10;
-  } else if (roll < 0.5) {
-    picks = [[0, sizeIn(150, 230)], [1, sizeIn(150, 230)], [MOUTH, sizeIn(160, 260)]];
+  } else if (roll < 0.55) {
+    picks = [[0, rel(0.55, 0.85)], [1, rel(0.55, 0.85)], [MOUTH, rel(0.7, 1.0)]];
     zoom = round(random(1.2, 2) * 10) / 10;
   } else {
     const count = random() < 0.5 ? 1 : random() < 0.7 ? 2 : 3;
     const pool = FEATURES.map((_, i) => i);
     picks = [];
-    for (let i = 0; i < count; i++) picks.push([pool.splice(floor(random(pool.length)), 1)[0], sizeIn(50, MAX_SIZE)]);
+    for (let i = 0; i < count; i++) picks.push([pool.splice(floor(random(pool.length)), 1)[0], rel(0.35, 1.2)]);
     zoom = round(random(MIN_ZOOM, RANDOM_MAX_ZOOM) * 10) / 10;
   }
   for (const [idx, size] of picks) {
